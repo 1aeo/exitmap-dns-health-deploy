@@ -745,6 +745,7 @@ main() {
     fi
     log "DNS_WILDCARD_DOMAIN: ${DNS_WILDCARD_DOMAIN:-tor.exit.validator.1aeo.com}"
     log "DNS_EXPECTED_IP: ${DNS_EXPECTED_IP:-64.65.4.1}"
+    log "DNS_QUERY_TIMEOUT: ${DNS_QUERY_TIMEOUT:-45}s"
     
     # Log git version if available (single git command)
     if command -v git &>/dev/null && [[ -d "$EXITMAP_DIR/.git" ]]; then
