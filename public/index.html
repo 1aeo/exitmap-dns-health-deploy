@@ -5,14 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="description" content="Tor Exit Relay DNS Health - Monitoring DNS resolution capability across Tor exit relays">
     <!-- Security: Content Security Policy -->
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self';">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self';">
     <meta http-equiv="X-Content-Type-Options" content="nosniff">
     <meta http-equiv="X-Frame-Options" content="DENY">
     <meta name="referrer" content="strict-origin-when-cross-origin">
     <title>Tor Exit DNS Health - 1AEO</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <style>
         /* 1AEO Brand Design Tokens */
         :root {
@@ -20,14 +17,14 @@
             --aeo-green-dim: #00cc66;
             --aeo-green-hover: #009955;
             --aeo-green-dark: #004d26;
-            --aeo-dark-bg: #0d1117;
-            --aeo-dark-surface: #161b22;
-            --aeo-dark-tertiary: #21262d;
+            --aeo-dark-bg: #121212;
+            --aeo-dark-surface: #1e1e1e;
+            --aeo-dark-tertiary: #252525;
             --aeo-dark-border: rgba(0, 255, 127, 0.2);
-            --aeo-border-solid: #30363d;
-            --aeo-text: #e6edf3;
-            --aeo-text-muted: #8b949e;
-            --aeo-text-dim: #6e7681;
+            --aeo-border-solid: rgba(0, 255, 127, 0.2);
+            --aeo-text: #ffffff;
+            --aeo-text-muted: #cccccc;
+            --aeo-text-dim: #888888;
             --aeo-dark-hover: #252525;
             /* Status colors */
             --status-success: #3fb950;
@@ -44,11 +41,13 @@
         }
 
         body {
-            font-family: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
-            background: var(--aeo-dark-bg);
+            font-family: Arial, sans-serif;
+            background-color: var(--aeo-dark-bg);
             color: var(--aeo-text);
             min-height: 100vh;
             line-height: 1.6;
+            margin: 0;
+            padding: 0;
         }
 
         /* 1AEO Cross-Site Navigation Bar */
@@ -59,9 +58,9 @@
         }
         
         .aeo-cross-nav .aeo-nav-container {
-            max-width: 1200px;
+            max-width: 95%;
             margin: 0 auto;
-            padding: 0 2rem;
+            padding: 0 15px;
             display: flex;
             align-items: center;
             justify-content: space-between;
@@ -160,47 +159,6 @@
             line-height: 1.6;
         }
 
-        .stats-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 1rem;
-            margin-bottom: 2rem;
-        }
-
-        .stat-card {
-            background: var(--aeo-dark-surface);
-            border: 1px solid var(--aeo-green);
-            border-radius: 12px;
-            padding: 1.5rem;
-            text-align: center;
-            transition: transform 0.2s, box-shadow 0.2s;
-            box-shadow: 0 0 10px rgba(0, 255, 127, 0.2);
-        }
-
-        .stat-card:hover {
-            transform: translateY(-3px);
-            box-shadow: 0 0 20px rgba(0, 255, 127, 0.4);
-        }
-
-        .stat-value {
-            font-size: 2.5rem;
-            font-weight: 700;
-            font-family: 'JetBrains Mono', monospace;
-        }
-
-        .stat-value.success { color: var(--status-success); }
-        .stat-value.warning { color: var(--status-warning); }
-        .stat-value.error { color: var(--status-error); }
-        .stat-value.info { color: var(--status-info); }
-
-        .stat-label {
-            color: var(--aeo-green);
-            font-size: 0.9rem;
-            margin-top: 0.5rem;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-        }
-
         .section {
             background: var(--aeo-dark-surface);
             border: 1px solid var(--aeo-green);
@@ -217,6 +175,8 @@
             display: flex;
             align-items: center;
             justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 0.5rem;
         }
 
         .section-title {
@@ -231,6 +191,123 @@
         .section-content {
             padding: 1.5rem;
         }
+
+        /* Unified Results Section */
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .metric-item {
+            text-align: center;
+            padding: 1rem;
+            background: var(--aeo-dark-tertiary);
+            border-radius: 8px;
+        }
+
+        .metric-value {
+            font-size: 2rem;
+            font-weight: 700;
+            font-family: monospace;
+        }
+
+        .metric-value.success { color: var(--status-success); }
+        .metric-value.warning { color: var(--status-warning); }
+        .metric-value.error { color: var(--status-error); }
+        .metric-value.info { color: var(--status-info); }
+
+        .metric-label {
+            color: var(--aeo-text-muted);
+            font-size: 0.8rem;
+            margin-top: 0.25rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .details-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 1.5rem;
+            padding: 1rem 0;
+            border-top: 1px solid var(--aeo-border-solid);
+            font-size: 0.9rem;
+        }
+
+        .detail-item {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .detail-label {
+            color: var(--aeo-text-dim);
+        }
+
+        .detail-value {
+            color: var(--aeo-text);
+            font-family: monospace;
+        }
+
+        .detail-value.highlight {
+            color: var(--aeo-green);
+        }
+
+        .subsection-divider {
+            border-top: 1px solid var(--aeo-border-solid);
+            margin: 1.5rem 0;
+        }
+
+        .subsection-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 1rem;
+        }
+
+        .subsection-title {
+            font-size: 1rem;
+            font-weight: 600;
+            color: var(--status-warning);
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .subsection-count {
+            font-family: monospace;
+            font-size: 0.85rem;
+            color: var(--aeo-text-dim);
+        }
+
+        /* Status breakdown inline */
+        .status-chips {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+            margin-top: 1rem;
+        }
+
+        .status-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            padding: 0.3rem 0.6rem;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            font-family: monospace;
+        }
+
+        .status-chip.success { background: rgba(63, 185, 80, 0.15); color: var(--status-success); }
+        .status-chip.dns_fail { background: rgba(248, 81, 73, 0.15); color: var(--status-error); }
+        .status-chip.timeout { background: rgba(210, 153, 34, 0.15); color: var(--status-warning); }
+        .status-chip.hard_timeout { background: rgba(210, 153, 34, 0.15); color: var(--status-warning); }
+        .status-chip.wrong_ip { background: rgba(163, 113, 247, 0.15); color: var(--status-purple); }
+        .status-chip.exception { background: rgba(139, 148, 158, 0.15); color: var(--aeo-text-muted); }
+        .status-chip.socks_error { background: rgba(139, 148, 158, 0.15); color: var(--aeo-text-muted); }
+        .status-chip.network_error { background: rgba(139, 148, 158, 0.15); color: var(--aeo-text-muted); }
+        .status-chip.error { background: rgba(139, 148, 158, 0.15); color: var(--aeo-text-muted); }
 
         .two-col-grid {
             display: grid;
@@ -265,18 +342,18 @@
 
         .data-table td:last-child {
             text-align: right;
-            font-family: 'JetBrains Mono', monospace;
+            font-family: monospace;
         }
 
         .failures-table {
             width: 100%;
             border-collapse: collapse;
-            font-size: 0.9rem;
+            font-size: 0.85rem;
         }
 
         .failures-table th,
         .failures-table td {
-            padding: 0.75rem;
+            padding: 0.6rem;
             text-align: left;
             border-bottom: 1px solid var(--aeo-border-solid);
         }
@@ -285,7 +362,7 @@
             color: var(--aeo-green);
             font-weight: 500;
             text-transform: uppercase;
-            font-size: 0.75rem;
+            font-size: 0.7rem;
             letter-spacing: 0.05em;
         }
 
@@ -297,9 +374,9 @@
             display: inline-block;
             padding: 0.2rem 0.5rem;
             border-radius: 4px;
-            font-size: 0.75rem;
+            font-size: 0.7rem;
             font-weight: 500;
-            font-family: 'JetBrains Mono', monospace;
+            font-family: monospace;
         }
 
         .status-badge.success { background: rgba(63, 185, 80, 0.2); color: var(--status-success); }
@@ -312,30 +389,14 @@
         .status-badge.error { background: rgba(139, 148, 158, 0.2); color: var(--aeo-text-muted); }
         .status-badge.exception { background: rgba(139, 148, 158, 0.2); color: var(--aeo-text-muted); }
 
-        .progress-bar {
-            height: 6px;
-            background: var(--aeo-dark-tertiary);
-            border-radius: 3px;
-            overflow: hidden;
-            margin-top: 0.25rem;
-        }
-
-        .progress-fill {
-            height: 100%;
-            border-radius: 3px;
-            transition: width 0.3s ease;
-        }
-
-        .progress-fill.green { background: var(--status-success); }
-        .progress-fill.red { background: var(--status-error); }
-        .progress-fill.yellow { background: var(--status-warning); }
-        .progress-fill.purple { background: var(--status-purple); }
-        .progress-fill.blue { background: var(--status-info); }
-
         .fingerprint {
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 0.8rem;
+            font-family: monospace;
+            font-size: 0.75rem;
             color: var(--aeo-text-dim);
+            max-width: 280px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
         }
 
         .api-list {
@@ -357,7 +418,7 @@
         }
 
         .api-method {
-            font-family: 'JetBrains Mono', monospace;
+            font-family: monospace;
             font-size: 0.75rem;
             font-weight: 600;
             padding: 0.25rem 0.5rem;
@@ -368,7 +429,7 @@
         }
 
         .api-path {
-            font-family: 'JetBrains Mono', monospace;
+            font-family: monospace;
             color: var(--status-info);
             flex: 1;
         }
@@ -418,9 +479,72 @@
         }
 
         .timestamp {
-            font-family: 'JetBrains Mono', monospace;
+            font-family: monospace;
             font-size: 0.85rem;
             color: var(--aeo-text-dim);
+        }
+
+        /* Buttons */
+        .button {
+            display: inline-block;
+            background-color: var(--aeo-green);
+            color: var(--aeo-dark-bg);
+            padding: 0.5rem 1rem;
+            border-radius: 5px;
+            text-decoration: none;
+            font-weight: bold;
+            font-size: 0.85rem;
+            transition: background 0.3s, transform 0.2s;
+            border: none;
+            cursor: pointer;
+        }
+
+        .button:hover {
+            background-color: var(--aeo-green-dim);
+            transform: translateY(-2px);
+            text-decoration: none;
+        }
+
+        .header-buttons {
+            display: flex;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+        }
+
+        /* File list for historical archive */
+        .file-list {
+            list-style: none;
+            padding: 0;
+        }
+
+        .file-item {
+            background: var(--aeo-dark-tertiary);
+            border: 1px solid var(--aeo-border-solid);
+            border-radius: 8px;
+            padding: 1rem;
+            margin: 0.5rem 0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+            transition: background 0.2s, box-shadow 0.2s;
+        }
+
+        .file-item:hover {
+            background: var(--aeo-dark-hover);
+            box-shadow: 0 0 10px rgba(0, 255, 127, 0.2);
+        }
+
+        .file-name {
+            color: var(--aeo-text);
+            font-weight: 500;
+        }
+
+        .file-meta {
+            color: var(--aeo-text-muted);
+            font-size: 0.85rem;
+            font-family: monospace;
         }
 
         /* 1AEO Footer */
@@ -464,7 +588,11 @@
         @media (max-width: 768px) {
             .container { padding: 1rem; }
             h1 { font-size: 1.75rem; }
-            .stat-value { font-size: 1.75rem; }
+            .metrics-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+            .metric-value { font-size: 1.5rem; }
+            .details-row { flex-direction: column; gap: 0.75rem; }
             .api-item { flex-direction: column; align-items: flex-start; gap: 0.5rem; }
             .api-desc { margin-left: 0; }
             .aeo-cross-nav .aeo-nav-container {
@@ -488,7 +616,7 @@
                 <a href="https://www.1aeo.com">Home</a>
                 <a href="https://metrics.1aeo.com">Metrics</a>
                 <a href="https://aroivalidator.1aeo.com">AROI Validator</a>
-                <a href="https://exitdns.1aeo.com" class="active">Exit DNS Health</a>
+                <a href="https://exitdnshealth.1aeo.com" class="active">Exit DNS Health</a>
                 <a href="https://routefluxmap.1aeo.com">RouteFluxMap</a>
             </div>
         </div>
@@ -507,77 +635,44 @@
             </p>
         </header>
 
-        <div id="stats" class="stats-grid">
-            <div class="loading">
-                <div class="spinner"></div>
-                Loading latest results...
-            </div>
-        </div>
-
-        <div class="two-col-grid">
-            <div id="breakdown-section" class="section" style="display: none;">
-                <div class="section-header">
-                    <span class="section-title">📊 Status Breakdown</span>
-                </div>
-                <div class="section-content">
-                    <table class="data-table">
-                        <thead>
-                            <tr>
-                                <th>Status</th>
-                                <th>Count</th>
-                            </tr>
-                        </thead>
-                        <tbody id="breakdown-tbody"></tbody>
-                    </table>
-                </div>
-            </div>
-
-            <div id="latency-section" class="section" style="display: none;">
-                <div class="section-header">
-                    <span class="section-title">⏱️ Latency Statistics</span>
-                </div>
-                <div class="section-content">
-                    <table class="data-table">
-                        <thead>
-                            <tr>
-                                <th>Metric</th>
-                                <th>Value</th>
-                            </tr>
-                        </thead>
-                        <tbody id="latency-tbody"></tbody>
-                    </table>
-                </div>
-            </div>
-        </div>
-
-        <div id="scan-info-section" class="section" style="display: none;">
+        <!-- Unified Results Section -->
+        <div id="results-section" class="section">
             <div class="section-header">
-                <span class="section-title">🔍 Scan Information</span>
+                <span class="section-title">📊 Latest Results</span>
+                <div style="display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;">
+                    <span id="scan-timestamp" class="timestamp">Loading...</span>
+                    <div class="header-buttons">
+                        <a href="/latest.json" class="button" target="_blank">👁️ View JSON</a>
+                        <a href="/latest.json" class="button" download="latest.json">⬇️ Download</a>
+                    </div>
+                </div>
             </div>
             <div class="section-content">
-                <table class="data-table">
-                    <tbody id="scan-info-tbody"></tbody>
-                </table>
+                <div id="results-content">
+                    <div class="loading">
+                        <div class="spinner"></div>
+                        Loading latest results...
+                    </div>
+                </div>
             </div>
         </div>
 
-        <div id="failures-section" class="section" style="display: none;">
+        <!-- Historical Results Archive -->
+        <div class="section">
             <div class="section-header">
-                <span class="section-title">⚠️ Failed Relays</span>
-                <span id="failures-count" class="timestamp"></span>
+                <span class="section-title">📁 Historical Results Archive</span>
             </div>
             <div class="section-content">
-                <table class="failures-table">
-                    <thead>
-                        <tr>
-                            <th>Nickname</th>
-                            <th>Fingerprint</th>
-                            <th>Status</th>
-                            <th>Error</th>
-                        </tr>
-                    </thead>
-                    <tbody id="failures-tbody"></tbody>
-                </table>
+                <p style="color: var(--aeo-text-muted); margin-bottom: 1rem;">
+                    Browse all DNS health scan results. Each file contains complete metadata, statistics, 
+                    and detailed results for individual relays.
+                </p>
+                <ul class="file-list" id="file-list">
+                    <li class="file-item" style="justify-content: center;">
+                        <div class="spinner" style="width: 24px; height: 24px; margin: 0;"></div>
+                        <span style="color: var(--aeo-text-dim);">Loading results...</span>
+                    </li>
+                </ul>
             </div>
         </div>
 
@@ -629,13 +724,14 @@
                 </p>
             </div>
         </div>
+
     </div>
 
     <footer class="aeo-footer">
         <div class="aeo-footer-links">
             <a href="https://metrics.1aeo.com" rel="noopener noreferrer">Metrics</a>
             <a href="https://aroivalidator.1aeo.com" rel="noopener noreferrer">AROI Validator</a>
-            <a href="https://exitdns.1aeo.com" rel="noopener noreferrer">Exit DNS Health</a>
+            <a href="https://exitdnshealth.1aeo.com" rel="noopener noreferrer">Exit DNS Health</a>
             <a href="https://routefluxmap.1aeo.com" rel="noopener noreferrer">RouteFluxMap</a>
             <a href="https://github.com/1aeo" rel="noopener noreferrer">GitHub</a>
         </div>
@@ -648,20 +744,9 @@
     </footer>
 
     <script>
-        const STATUS_COLORS = {
-            success: 'green',
-            dns_fail: 'red',
-            timeout: 'yellow',
-            hard_timeout: 'yellow',
-            wrong_ip: 'purple',
-            socks_error: 'blue',
-            network_error: 'blue',
-            exception: 'blue',
-            error: 'blue'
-        };
-
         async function loadStats() {
-            const statsEl = document.getElementById('stats');
+            const contentEl = document.getElementById('results-content');
+            const timestampEl = document.getElementById('scan-timestamp');
             
             try {
                 const response = await fetch('/latest.json');
@@ -674,167 +759,195 @@
                 const success = meta.success || 0;
                 const successRate = meta.success_rate_percent || 0;
                 const failures = total - success;
-                const latency = meta.latency_stats || {};
-                const breakdown = meta.status_breakdown || {};
+                const cv = meta.cross_validation || {};
                 
-                statsEl.innerHTML = `
-                    <div class="stat-card">
-                        <div class="stat-value info">${total.toLocaleString()}</div>
-                        <div class="stat-label">Total Relays</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-value success">${success.toLocaleString()}</div>
-                        <div class="stat-label">Successful</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-value ${failures > 0 ? 'error' : 'success'}">${failures.toLocaleString()}</div>
-                        <div class="stat-label">Failed</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-value ${successRate >= 95 ? 'success' : successRate >= 80 ? 'warning' : 'error'}">${successRate.toFixed(1)}%</div>
-                        <div class="stat-label">Success Rate</div>
-                    </div>
-                `;
-
-                // Render status breakdown
-                renderBreakdown(breakdown, total);
-                
-                // Render latency stats
-                renderLatency(latency);
-                
-                // Render scan info
-                renderScanInfo(meta);
-
-                // Show failures table
-                if (data.failures && data.failures.length > 0) {
-                    renderFailures(data.failures);
+                // Update timestamp in header
+                if (meta.timestamp) {
+                    timestampEl.textContent = formatTimestamp(meta.timestamp);
                 }
                 
+                // Build the unified content
+                let html = `
+                    <!-- Key Metrics -->
+                    <div class="metrics-grid">
+                        <div class="metric-item">
+                            <div class="metric-value info">${total.toLocaleString()}</div>
+                            <div class="metric-label">Total Relays</div>
+                        </div>
+                        <div class="metric-item">
+                            <div class="metric-value success">${success.toLocaleString()}</div>
+                            <div class="metric-label">Successful</div>
+                        </div>
+                        <div class="metric-item">
+                            <div class="metric-value ${failures > 0 ? 'error' : 'success'}">${failures.toLocaleString()}</div>
+                            <div class="metric-label">Failed</div>
+                        </div>
+                        <div class="metric-item">
+                            <div class="metric-value ${successRate >= 95 ? 'success' : successRate >= 80 ? 'warning' : 'error'}">${successRate.toFixed(1)}%</div>
+                            <div class="metric-label">Success Rate</div>
+                        </div>
+                    </div>
+                `;
+                
+                // Row 1: Configuration
+                const configItems = [];
+                configItems.push(`<span class="detail-label">DNS Validation Mode:</span> <span class="detail-value">${meta.mode || 'wildcard'}</span>`);
+                
+                if (cv.enabled) {
+                    configItems.push(`<span class="detail-label">Cross-Validation:</span> <span class="detail-value">${cv.instances} instances</span>`);
+                    if (cv.relays_improved) {
+                        configItems.push(`<span class="detail-label">Cross-Validation Relays Recovered:</span> <span class="detail-value">${cv.relays_improved.toLocaleString()}</span>`);
+                    }
+                }
+                
+                html += `
+                    <div class="details-row">
+                        <div class="detail-item">
+                            <span class="detail-label" style="color: var(--aeo-green);">⚙️ Configuration:</span>
+                        </div>
+                        ${configItems.map(d => `<div class="detail-item">${d}</div>`).join('')}
+                    </div>
+                `;
+                
+                // Row 2: Results breakdown
+                const statusColors = {
+                    success: 'var(--status-success)',
+                    timeout: 'var(--status-warning)',
+                    dns_fail: 'var(--status-error)',
+                    exception: 'var(--aeo-text-muted)',
+                    wrong_ip: 'var(--status-purple)',
+                    socks_error: 'var(--aeo-text-muted)',
+                    network_error: 'var(--aeo-text-muted)',
+                    error: 'var(--aeo-text-muted)'
+                };
+                
+                const statusCounts = {
+                    success: meta.success || 0,
+                    timeout: meta.timeout || 0,
+                    dns_fail: meta.dns_fail || 0,
+                    exception: meta.exception || 0,
+                    wrong_ip: meta.wrong_ip || 0,
+                    socks_error: meta.socks_error || 0,
+                    network_error: meta.network_error || 0,
+                    error: meta.error || 0
+                };
+                
+                const nonZeroStatuses = Object.entries(statusCounts)
+                    .filter(([_, count]) => count > 0)
+                    .sort((a, b) => b[1] - a[1]);
+                
+                if (nonZeroStatuses.length > 0) {
+                    html += `
+                        <div class="details-row">
+                            <div class="detail-item">
+                                <span class="detail-label" style="color: var(--aeo-green);">📊 Results:</span>
+                            </div>
+                            ${nonZeroStatuses.map(([status, count]) => 
+                                `<div class="detail-item"><span class="detail-label">${status}:</span> <span class="detail-value" style="color: ${statusColors[status]}">${count.toLocaleString()}</span></div>`
+                            ).join('')}
+                        </div>
+                    `;
+                }
+                
+                // Row 3-5: Timing (Total, Socket, DNS)
+                const timing = meta.timing || {};
+                
+                // Helper to build timing row
+                const buildTimingRow = (label, title, stats, icon) => {
+                    if (!stats || stats.avg_ms === undefined || stats.avg_ms === null) return '';
+                    const items = [
+                        ['Min', stats.min_ms],
+                        ['Avg', stats.avg_ms],
+                        ['P50', stats.p50_ms],
+                        ['P95', stats.p95_ms],
+                        ['P99', stats.p99_ms],
+                        ['Max', stats.max_ms]
+                    ].filter(([_, val]) => val !== undefined && val !== null);
+                    
+                    if (items.length === 0) return '';
+                    return `
+                        <div class="details-row">
+                            <div class="detail-item">
+                                <span class="detail-label" style="color: var(--aeo-green); cursor: help;" title="${title}">${icon} ${label}:</span>
+                            </div>
+                            ${items.map(([lbl, value]) => 
+                                `<div class="detail-item"><span class="detail-label">${lbl}:</span> <span class="detail-value">${formatLatency(value)}</span></div>`
+                            ).join('')}
+                        </div>
+                    `;
+                };
+                
+                // Total timing (Tor circuit + DNS resolution)
+                html += buildTimingRow(
+                    'Latency',
+                    'Total time including Tor circuit establishment (guard → exit) plus DNS resolution through the exit relay.',
+                    timing.total,
+                    '⏱️'
+                );
+                
+                // Failed relays section (connected, not separate)
+                if (data.failures && data.failures.length > 0) {
+                    html += `
+                        <div class="subsection-header" style="border-top: 1px solid var(--aeo-border-solid); padding-top: 1rem; margin-top: 0;">
+                            <span class="subsection-title">⚠️ Failed Relays</span>
+                            <span class="subsection-count">${data.failures.length} relays</span>
+                        </div>
+                        <table class="failures-table">
+                            <thead>
+                                <tr>
+                                    <th>Nickname</th>
+                                    <th>Fingerprint</th>
+                                    <th>Status</th>
+                                    <th>Error</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                    `;
+                    
+                    const displayFailures = data.failures.slice(0, 50);
+                    html += displayFailures.map(f => `
+                        <tr>
+                            <td><strong>${escapeHtml(f.exit_nickname || 'Unknown')}</strong></td>
+                            <td class="fingerprint" title="${f.exit_fingerprint || ''}">${f.exit_fingerprint || ''}</td>
+                            <td><span class="status-badge ${f.status || 'error'}">${f.status || 'error'}</span></td>
+                            <td style="color: var(--aeo-text-muted); font-size: 0.8rem;">${escapeHtml((f.error || '').slice(0, 50))}</td>
+                        </tr>
+                    `).join('');
+                    
+                    if (data.failures.length > 50) {
+                        html += `
+                            <tr>
+                                <td colspan="4" style="text-align: center; color: var(--aeo-text-dim); padding: 1rem;">
+                                    ... and ${data.failures.length - 50} more failures
+                                </td>
+                            </tr>
+                        `;
+                    }
+                    
+                    html += `
+                            </tbody>
+                        </table>
+                    `;
+                }
+                
+                contentEl.innerHTML = html;
+                
             } catch (err) {
-                statsEl.innerHTML = `
-                    <div class="error-message" style="grid-column: 1 / -1;">
+                contentEl.innerHTML = `
+                    <div class="error-message">
                         Unable to load results. The scan may not have run yet.<br>
                         <small>${escapeHtml(err.message)}</small>
                     </div>
                 `;
+                timestampEl.textContent = '—';
             }
         }
 
-        function renderBreakdown(breakdown, total) {
-            if (!breakdown || Object.keys(breakdown).length === 0) return;
-            
-            const section = document.getElementById('breakdown-section');
-            const tbody = document.getElementById('breakdown-tbody');
-            
-            // Sort by count descending
-            const sorted = Object.entries(breakdown).sort((a, b) => b[1] - a[1]);
-            
-            tbody.innerHTML = sorted.map(([status, count]) => {
-                const pct = total > 0 ? (count / total * 100).toFixed(1) : 0;
-                const color = STATUS_COLORS[status] || 'blue';
-                return `
-                    <tr>
-                        <td>
-                            <span class="status-badge ${status}">${status}</span>
-                            <div class="progress-bar">
-                                <div class="progress-fill ${color}" style="width: ${pct}%"></div>
-                            </div>
-                        </td>
-                        <td>${count.toLocaleString()} (${pct}%)</td>
-                    </tr>
-                `;
-            }).join('');
-            
-            section.style.display = 'block';
-        }
-
-        function renderLatency(latency) {
-            if (!latency || !latency.avg_ms) return;
-            
-            const section = document.getElementById('latency-section');
-            const tbody = document.getElementById('latency-tbody');
-            
-            const metrics = [
-                ['Minimum', latency.min_ms],
-                ['Average', latency.avg_ms],
-                ['Median', latency.median_ms],
-                ['P95', latency.p95_ms],
-                ['Maximum', latency.max_ms]
-            ].filter(([_, val]) => val !== undefined && val !== null);
-            
-            tbody.innerHTML = metrics.map(([label, value]) => `
-                <tr>
-                    <td>${label}</td>
-                    <td>${Number(value).toLocaleString()} ms</td>
-                </tr>
-            `).join('');
-            
-            section.style.display = 'block';
-        }
-
-        function renderScanInfo(meta) {
-            const section = document.getElementById('scan-info-section');
-            const tbody = document.getElementById('scan-info-tbody');
-            
-            const info = [
-                ['Run ID', meta.run_id],
-                ['Mode', meta.mode || 'wildcard'],
-                ['Generated', meta.generated_at],
-                ['First Hop', meta.first_hop ? meta.first_hop.slice(0, 16) + '...' : 'Random'],
-            ];
-            
-            // Add cross-validation info if present
-            const cv = meta.cross_validation || {};
-            if (cv.enabled) {
-                info.push(['Cross-Validation', `${cv.instances || 'N/A'} instances`]);
-                if (cv.relays_improved) {
-                    info.push(['Relays Recovered', cv.relays_improved]);
-                }
+        function formatLatency(ms) {
+            if (ms >= 1000) {
+                return (ms / 1000).toFixed(2) + 's';
             }
-            
-            const filtered = info.filter(([_, val]) => val !== undefined && val !== null);
-            
-            if (filtered.length === 0) return;
-            
-            tbody.innerHTML = filtered.map(([label, value]) => `
-                <tr>
-                    <td>${escapeHtml(label)}</td>
-                    <td>${escapeHtml(String(value))}</td>
-                </tr>
-            `).join('');
-            
-            section.style.display = 'block';
-        }
-
-        function renderFailures(failures) {
-            const section = document.getElementById('failures-section');
-            const tbody = document.getElementById('failures-tbody');
-            const count = document.getElementById('failures-count');
-            
-            count.textContent = `${failures.length} relays`;
-            
-            // Show first 50 failures
-            const displayFailures = failures.slice(0, 50);
-            tbody.innerHTML = displayFailures.map(f => `
-                <tr>
-                    <td><strong>${escapeHtml(f.exit_nickname || 'Unknown')}</strong></td>
-                    <td class="fingerprint">${(f.exit_fingerprint || '').slice(0, 16)}...</td>
-                    <td><span class="status-badge ${f.status || 'error'}">${f.status || 'error'}</span></td>
-                    <td style="color: var(--aeo-text-muted); font-size: 0.85rem;">${escapeHtml((f.error || '').slice(0, 60))}</td>
-                </tr>
-            `).join('');
-            
-            if (failures.length > 50) {
-                tbody.innerHTML += `
-                    <tr>
-                        <td colspan="4" style="text-align: center; color: var(--aeo-text-dim);">
-                            ... and ${failures.length - 50} more failures
-                        </td>
-                    </tr>
-                `;
-            }
-            
-            section.style.display = 'block';
+            return Math.round(ms) + 'ms';
         }
 
         function escapeHtml(str) {
@@ -844,8 +957,124 @@
             return div.innerHTML;
         }
 
+        function formatTimestamp(isoString) {
+            try {
+                const date = new Date(isoString);
+                return date.toLocaleString('en-US', {
+                    year: 'numeric',
+                    month: 'short',
+                    day: 'numeric',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit',
+                    timeZoneName: 'short'
+                });
+            } catch (e) {
+                return isoString;
+            }
+        }
+
+        // Pagination state for file list
+        let currentPage = 0;
+        const filesPerPage = 10;
+        let allFiles = [];
+
+        // Security: Validate filename format
+        const VALID_FILE = /^dns_health_(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})\.json$/;
+        const VALID_ARCHIVE = /^archives\/exitmap-\d{6}\.tar\.gz$/;
+
+        // Load and display all JSON files with pagination
+        async function loadFileList() {
+            const fileList = document.getElementById('file-list');
+            
+            try {
+                const response = await fetch('/files.json');
+                allFiles = await response.json();
+                
+                if (!allFiles || allFiles.length === 0) {
+                    fileList.innerHTML = `
+                        <li class="file-item">
+                            <div>
+                                <div class="file-name">📂 Historical Results</div>
+                                <div class="file-meta">Results will appear here after scan runs</div>
+                            </div>
+                        </li>
+                    `;
+                    return;
+                }
+                
+                displayPage(0);
+            } catch (error) {
+                console.error('Error loading file list:', error);
+                fileList.innerHTML = `
+                    <li class="file-item">
+                        <div>
+                            <div class="file-name">📂 Historical Results</div>
+                            <div class="file-meta">Check back after scan runs</div>
+                        </div>
+                    </li>
+                `;
+            }
+        }
+
+        // Display a specific page of results
+        function displayPage(page) {
+            const fileList = document.getElementById('file-list');
+            const totalPages = Math.ceil(allFiles.length / filesPerPage);
+            page = Math.max(0, Math.min(page | 0, totalPages - 1));
+            currentPage = page;
+            
+            const pageFiles = allFiles.slice(page * filesPerPage, (page + 1) * filesPerPage);
+            
+            const html = pageFiles.map(filename => {
+                const match = VALID_FILE.exec(filename);
+                if (!match && !VALID_ARCHIVE.test(filename)) {
+                    console.warn('Invalid filename rejected:', filename);
+                    return '';
+                }
+                
+                let displayDate = escapeHtml(filename);
+                if (match) {
+                    const [, y, mo, d, h, mi, s] = match;
+                    const dateObj = new Date(`${y}-${mo}-${d}T${h}:${mi}:${s}`);
+                    const timePart = dateObj.toLocaleTimeString('en-US', {
+                        hour: 'numeric', minute: '2-digit', second: '2-digit', timeZoneName: 'short'
+                    });
+                    displayDate = escapeHtml(`${y}-${mo}-${d} ${timePart}`);
+                }
+                
+                const safeFilename = encodeURIComponent(filename);
+                return `
+                    <li class="file-item">
+                        <div>
+                            <div class="file-name">${displayDate}</div>
+                            <div class="file-meta">${escapeHtml(filename)}</div>
+                        </div>
+                        <div style="display: flex; gap: 0.5rem;">
+                            <a href="/${safeFilename}" class="button" target="_blank" rel="noopener noreferrer">👁️ View</a>
+                            <a href="/${safeFilename}" class="button" download>⬇️ Download</a>
+                        </div>
+                    </li>`;
+            }).join('');
+            
+            // Pagination controls
+            const pagination = totalPages > 1 ? `
+                <li class="file-item" style="margin-top: 1rem; border-color: var(--aeo-green); justify-content: center;">
+                    <div style="display: flex; gap: 1rem; align-items: center; flex-wrap: wrap;">
+                        <button class="button" ${page === 0 ? 'disabled style="opacity: 0.5; cursor: not-allowed;"' : ''} onclick="displayPage(${page - 1})">← Previous</button>
+                        <span style="color: var(--aeo-green);">Page ${page + 1} of ${totalPages} (${allFiles.length} total)</span>
+                        <button class="button" ${page === totalPages - 1 ? 'disabled style="opacity: 0.5; cursor: not-allowed;"' : ''} onclick="displayPage(${page + 1})">Next →</button>
+                    </div>
+                </li>` : '';
+            
+            fileList.innerHTML = html + pagination;
+        }
+
+        // Initialize
         loadStats();
-        // Refresh every 5 minutes
+        loadFileList();
+        
+        // Refresh stats every 5 minutes
         setInterval(loadStats, 5 * 60 * 1000);
     </script>
 </body>
