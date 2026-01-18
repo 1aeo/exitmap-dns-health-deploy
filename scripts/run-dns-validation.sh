@@ -18,6 +18,10 @@
 
 set -euo pipefail
 
+# Ensure sufficient file descriptors for parallel circuit operations
+# (4 instances × 128 circuits × overhead = ~5k needed, 128k provides large safety margin)
+ulimit -n 131072 2>/dev/null || true
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEPLOY_DIR="$(dirname "$SCRIPT_DIR")"
 EXITMAP_DIR="$(dirname "$DEPLOY_DIR")"
@@ -74,8 +78,22 @@ fi
 # Default configuration
 OUTPUT_DIR="${OUTPUT_DIR:-$EXITMAP_DIR/results}"
 LOG_DIR="${LOG_DIR:-$EXITMAP_DIR/logs}"
+TMP_DIR="${TMP_DIR:-$DEPLOY_DIR/tmp}"
 BUILD_DELAY="${BUILD_DELAY:-0}"
 DELAY_NOISE="${DELAY_NOISE:-0}"
+
+# Auto-scale MAX_PENDING_CIRCUITS based on instance count to prevent process explosion
+# Each exitmap instance spawns a multiprocessing.Process PER circuit, so:
+# - Single instance: 128 circuits = ~128 processes
+# - 4 instances × 128 = 512 processes (too many, causes OOM)
+# Solution: Scale down per-instance circuits to keep total ~128
+if [[ "$MODE" != "single" ]] && [[ -z "${MAX_PENDING_CIRCUITS:-}" ]]; then
+    # Auto-calculate: target ~128 total concurrent circuits across all instances
+    MAX_PENDING_CIRCUITS=$((128 / INSTANCE_COUNT))
+    # Minimum 16 to maintain some parallelism
+    [[ $MAX_PENDING_CIRCUITS -lt 16 ]] && MAX_PENDING_CIRCUITS=16
+    export MAX_PENDING_CIRCUITS
+fi
 
 # Export settings for the Python modules (read from environment)
 [[ -n "${MAX_PENDING_CIRCUITS:-}" ]] && export MAX_PENDING_CIRCUITS
@@ -93,10 +111,26 @@ ALL_EXITS="${ALL_EXITS:-true}"
 DO_ENABLED="${DO_ENABLED:-false}"
 R2_ENABLED="${R2_ENABLED:-false}"
 
-# Retry settings
-BOOTSTRAP_TIMEOUT="${BOOTSTRAP_TIMEOUT:-90}"
-MAX_BOOTSTRAP_RETRIES="${MAX_BOOTSTRAP_RETRIES:-3}"
-PROGRESS_CHECK_INTERVAL="${PROGRESS_CHECK_INTERVAL:-10}"
+# Tor bootstrap retry settings
+TOR_BOOTSTRAP_TIMEOUT="${TOR_BOOTSTRAP_TIMEOUT:-90}"
+TOR_MAX_BOOTSTRAP_RETRIES="${TOR_MAX_BOOTSTRAP_RETRIES:-3}"
+TOR_PROGRESS_CHECK_INTERVAL="${TOR_PROGRESS_CHECK_INTERVAL:-10}"
+
+# Validate exitmap installation
+EXITMAP_BIN="$EXITMAP_DIR/bin/exitmap"
+if [[ ! -f "$EXITMAP_BIN" ]]; then
+    echo "ERROR: exitmap not found at: $EXITMAP_BIN" >&2
+    echo "" >&2
+    echo "Expected directory structure:" >&2
+    echo "  EXITMAP_DIR/bin/exitmap" >&2
+    echo "" >&2
+    echo "Current EXITMAP_DIR: $EXITMAP_DIR" >&2
+    echo "" >&2
+    echo "To fix, either:" >&2
+    echo "  1. Set EXITMAP_DIR in config.env to point to the exitmap installation" >&2
+    echo "  2. Move exitmap-dns-health-deploy inside the exitmap directory" >&2
+    exit 1
+fi
 
 TIMESTAMP=$(date +%Y-%m-%d_%H-%M-%S)
 LOCK_FILE="/tmp/exitmap_dns_health.lock"
@@ -160,18 +194,44 @@ acquire_lock() {
 cleanup_instance() {
     local tor_dir=$1
     pkill -9 -f "tor -f.*$tor_dir" 2>/dev/null || true
-    rm -rf "$tor_dir" 2>/dev/null || true
+    
+    # Preserve cached-* files for faster Tor bootstrap (valid ~3 hours)
+    # Delete everything else (lock, keys, state, auth cookies)
+    if [[ -d "$tor_dir" ]]; then
+        find "$tor_dir" -mindepth 1 -maxdepth 1 \
+            ! -name 'cached-consensus' \
+            ! -name 'cached-descriptors' \
+            ! -name 'cached-descriptors.new' \
+            ! -name 'cached-certs' \
+            -exec rm -rf {} \; 2>/dev/null || true
+    fi
 }
 
 cleanup_all() {
     log "Cleaning up..."
+    
+    # Kill all child processes of this script first (catches subshells and their children)
+    pkill -9 -P $$ 2>/dev/null || true
+    
+    # Kill all exitmap processes (including orphaned ones from this run)
+    # Use multiple patterns to ensure we catch everything
+    pkill -9 -f "exitmap dnshealth" 2>/dev/null || true
     pkill -9 -f "bin/exitmap" 2>/dev/null || true
+    
+    # Kill tor processes started by exitmap
+    pkill -9 -f "tor -f.*exitmap_tor" 2>/dev/null || true
+    pkill -9 -f "tor -f - __OwningControllerProcess" 2>/dev/null || true
+    
+    # Wait briefly then kill any stragglers
+    sleep 1
+    pkill -9 -f "exitmap" 2>/dev/null || true
     pkill -9 -f "tor -f" 2>/dev/null || true
-    # Clean up all possible tor directories
+    
+    # Clean up all possible tor directories (preserve cached-* for faster next bootstrap)
     for i in $(seq 1 10); do
-        rm -rf "$HOME/exitmap_tor_$i" 2>/dev/null || true
+        cleanup_instance "$TMP_DIR/exitmap_tor_$i"
     done
-    rm -rf "$HOME/exitmap_tor" 2>/dev/null || true
+    cleanup_instance "$TMP_DIR/exitmap_tor"
     rm -f "$LOCK_FILE" 2>/dev/null || true
     rm -f /tmp/exitmap_fps_*.txt 2>/dev/null || true
 }
@@ -183,7 +243,7 @@ wait_for_bootstrap() {
     local start_time=$(date +%s)
     
     while true; do
-        sleep "$PROGRESS_CHECK_INTERVAL"
+        sleep "$TOR_PROGRESS_CHECK_INTERVAL"
         local now=$(date +%s)
         local elapsed=$((now - start_time))
         
@@ -204,7 +264,7 @@ wait_for_bootstrap() {
         fi
         
         # Check for timeout
-        if [ $elapsed -gt "$BOOTSTRAP_TIMEOUT" ]; then
+        if [ $elapsed -gt "$TOR_BOOTSTRAP_TIMEOUT" ]; then
             log "$instance_name: Bootstrap timeout after ${elapsed}s"
             return 1
         fi
@@ -225,7 +285,7 @@ wait_for_scan() {
     local stall_time=0
     
     while true; do
-        sleep "$PROGRESS_CHECK_INTERVAL"
+        sleep "$TOR_PROGRESS_CHECK_INTERVAL"
         
         # Check if process is still running
         if ! pgrep -f "analysis-dir $analysis_dir" > /dev/null 2>&1; then
@@ -238,19 +298,51 @@ wait_for_scan() {
         local elapsed=$((now - start_time))
         local count=$(count_results "$analysis_dir")
         
+        # Extract progress info from exitmap log
+        local progress_info=""
+        if [[ -f "$log_file" ]]; then
+            # Get latest progress line: "Probed X out of Y exit relays, so we are Z% done."
+            local progress_line=$(grep -oP 'Probed \d+ out of \d+ exit relays.*done' "$log_file" 2>/dev/null | tail -1)
+            if [[ -n "$progress_line" ]]; then
+                # Extract probed/total/percentage
+                local probed=$(echo "$progress_line" | grep -oP 'Probed \K\d+')
+                local total=$(echo "$progress_line" | grep -oP 'out of \K\d+')
+                local pct=$(echo "$progress_line" | grep -oP '\d+\.\d+(?=% done)')
+                
+                # Count totals from entire log
+                local total_ok=$(grep -c '(correct)' "$log_file" 2>/dev/null || echo 0)
+                local total_timeout=$(grep -c '\[timeout\]' "$log_file" 2>/dev/null || echo 0)
+                local total_failed=$(grep -c '\[FAILED\]' "$log_file" 2>/dev/null || echo 0)
+                
+                if [[ -n "$probed" ]] && [[ -n "$total" ]]; then
+                    progress_info="${probed}/${total} (${pct:-?}%) | ${total_ok}ok/${total_timeout}to/${total_failed}fail"
+                fi
+            fi
+        fi
+        
         # Check for stall (no new results for 2 minutes after getting some)
         if [ "$count" -eq "$last_count" ] && [ "$count" -gt 0 ]; then
-            stall_time=$((stall_time + PROGRESS_CHECK_INTERVAL))
+            stall_time=$((stall_time + TOR_PROGRESS_CHECK_INTERVAL))
             if [ $stall_time -ge 120 ]; then
                 log "$instance_name: Scan appears stalled, considering complete"
                 return 0
             fi
+            # Show stall warning with time remaining
+            local stall_remain=$((120 - stall_time))
+            if [[ -n "$progress_info" ]]; then
+                log "$instance_name: Scanning... $count results (${elapsed}s) [stalled ${stall_time}s, ${stall_remain}s to timeout] | $progress_info"
+            else
+                log "$instance_name: Scanning... $count results (${elapsed}s) [stalled ${stall_time}s, ${stall_remain}s to timeout]"
+            fi
         else
             stall_time=0
+            if [[ -n "$progress_info" ]]; then
+                log "$instance_name: Scanning... $count results (${elapsed}s) | $progress_info"
+            else
+                log "$instance_name: Scanning... $count results (${elapsed}s)"
+            fi
         fi
         last_count=$count
-        
-        log "$instance_name: Scanning... $count results (${elapsed}s)"
     done
 }
 
@@ -266,8 +358,8 @@ run_instance() {
     mkdir -p "$analysis_dir"
     activate_venv
     
-    # Build command
-    local cmd="python3 bin/exitmap dnshealth"
+    # Build command (use absolute path to exitmap)
+    local cmd="python3 $EXITMAP_BIN dnshealth"
     cmd="$cmd -t $tor_dir"
     cmd="$cmd --build-delay ${BUILD_DELAY}"
     cmd="$cmd --delay-noise ${DELAY_NOISE}"
@@ -285,8 +377,8 @@ run_instance() {
     fi
     
     # Retry loop
-    for attempt in $(seq 1 "$MAX_BOOTSTRAP_RETRIES"); do
-        log "$instance_name: Attempt $attempt/$MAX_BOOTSTRAP_RETRIES"
+    for attempt in $(seq 1 "$TOR_MAX_BOOTSTRAP_RETRIES"); do
+        log "$instance_name: Attempt $attempt/$TOR_MAX_BOOTSTRAP_RETRIES"
         
         # Clean up tor directory
         cleanup_instance "$tor_dir"
@@ -301,6 +393,8 @@ run_instance() {
         if wait_for_bootstrap "$log_file" "$instance_name"; then
             # Bootstrap succeeded, wait for scan
             wait_for_scan "$log_file" "$analysis_dir" "$instance_name"
+            # Kill the process after scan completes or stalls (it may still be running)
+            kill -9 "$pid" 2>/dev/null || true
             wait $pid 2>/dev/null || true
             
             local count=$(count_results "$analysis_dir")
@@ -316,13 +410,13 @@ run_instance() {
         kill -9 "$pid" 2>/dev/null || true
         cleanup_instance "$tor_dir"
         
-        if [ $attempt -lt "$MAX_BOOTSTRAP_RETRIES" ]; then
+        if [ $attempt -lt "$TOR_MAX_BOOTSTRAP_RETRIES" ]; then
             log "$instance_name: Waiting 10s before retry..."
             sleep 10
         fi
     done
     
-    log "$instance_name: Failed after $MAX_BOOTSTRAP_RETRIES attempts"
+    log "$instance_name: Failed after $TOR_MAX_BOOTSTRAP_RETRIES attempts"
     return 1
 }
 
@@ -357,7 +451,7 @@ aggregate_results() {
     local analysis_dirs=("$@")
     local report_file="${output_dir}/dns_health_${TIMESTAMP}.json"
     local latest_report="${output_dir}/latest.json"
-    local merged_dir="${output_dir}/analysis_${TIMESTAMP}"
+    local merged_dir="${TMP_DIR}/analysis_${TIMESTAMP}"
     
     # Merge all analysis directories
     merge_analysis_dirs "$merged_dir" "${analysis_dirs[@]}"
@@ -428,15 +522,15 @@ do_uploads() {
     
     local pids=()
     
-    if [[ "${DO_ENABLED:-false}" == "true" ]] && [[ -x "$DEPLOY_DIR/scripts/upload_do.sh" ]]; then
+    if [[ "${DO_ENABLED:-false}" == "true" ]] && [[ -x "$DEPLOY_DIR/scripts/upload-do.sh" ]]; then
         log "Uploading to DigitalOcean Spaces..."
-        "$DEPLOY_DIR/scripts/upload_do.sh" "$report_file" "$latest_report" "$OUTPUT_DIR/files.json" &
+        "$DEPLOY_DIR/scripts/upload-do.sh" &
         pids+=($!)
     fi
     
-    if [[ "${R2_ENABLED:-false}" == "true" ]] && [[ -x "$DEPLOY_DIR/scripts/upload_r2.sh" ]]; then
+    if [[ "${R2_ENABLED:-false}" == "true" ]] && [[ -x "$DEPLOY_DIR/scripts/upload-r2.sh" ]]; then
         log "Uploading to Cloudflare R2..."
-        "$DEPLOY_DIR/scripts/upload_r2.sh" "$report_file" "$latest_report" "$OUTPUT_DIR/files.json" &
+        "$DEPLOY_DIR/scripts/upload-r2.sh" &
         pids+=($!)
     fi
     
@@ -459,8 +553,8 @@ start_parallel_instances() {
     INSTANCE_ANALYSIS_DIRS=()
     
     for i in $(seq 1 $n); do
-        local tor_dir="$HOME/exitmap_tor_$i"
-        local analysis_dir="${OUTPUT_DIR}/analysis_${TIMESTAMP}_${mode_prefix}$i"
+        local tor_dir="$TMP_DIR/exitmap_tor_$i"
+        local analysis_dir="${TMP_DIR}/analysis_${TIMESTAMP}_${mode_prefix}$i"
         local log_file="$LOG_DIR/exitmap_${TIMESTAMP}_${mode_prefix}$i.log"
         
         INSTANCE_ANALYSIS_DIRS+=("$analysis_dir")
@@ -498,8 +592,8 @@ wait_parallel_instances() {
 
 # Mode: Single instance
 run_single() {
-    local tor_dir="$HOME/exitmap_tor"
-    local analysis_dir="${OUTPUT_DIR}/analysis_${TIMESTAMP}"
+    local tor_dir="$TMP_DIR/exitmap_tor"
+    local analysis_dir="${TMP_DIR}/analysis_${TIMESTAMP}"
     local log_file="$LOG_DIR/exitmap_${TIMESTAMP}.log"
     
     log "=== Single Instance Mode ==="
@@ -537,7 +631,7 @@ run_split() {
     
     # First, bootstrap a temporary Tor to get the relay list
     log "Bootstrapping Tor to get relay list..."
-    local temp_tor_dir="$HOME/exitmap_tor_temp"
+    local temp_tor_dir="$TMP_DIR/exitmap_tor_temp"
     local temp_log="$LOG_DIR/exitmap_${TIMESTAMP}_temp.log"
     
     cleanup_instance "$temp_tor_dir"
@@ -616,10 +710,11 @@ except Exception as e:
 
 # Main entry point
 main() {
-    mkdir -p "$OUTPUT_DIR" "$LOG_DIR"
+    mkdir -p "$OUTPUT_DIR" "$LOG_DIR" "$TMP_DIR"
     
     acquire_lock
-    trap cleanup_all EXIT
+    # Trap EXIT and common signals to ensure cleanup on any termination
+    trap cleanup_all EXIT INT TERM HUP
     
     # Log system and configuration info for debugging
     log "=============================================="
@@ -640,10 +735,14 @@ main() {
     log "ALL_EXITS: ${ALL_EXITS:-true}"
     log "FIRST_HOP: ${FIRST_HOP:-<random>}"
     log "RELIABLE_FIRST_HOP: ${RELIABLE_FIRST_HOP:-false}"
-    log "BOOTSTRAP_TIMEOUT: ${BOOTSTRAP_TIMEOUT}s"
-    log "MAX_BOOTSTRAP_RETRIES: $MAX_BOOTSTRAP_RETRIES"
-    log "PROGRESS_CHECK_INTERVAL: ${PROGRESS_CHECK_INTERVAL}s"
-    log "MAX_PENDING_CIRCUITS: ${MAX_PENDING_CIRCUITS:-128}"
+    log "TOR_BOOTSTRAP_TIMEOUT: ${TOR_BOOTSTRAP_TIMEOUT}s"
+    log "TOR_MAX_BOOTSTRAP_RETRIES: $TOR_MAX_BOOTSTRAP_RETRIES"
+    log "TOR_PROGRESS_CHECK_INTERVAL: ${TOR_PROGRESS_CHECK_INTERVAL}s"
+    if [[ "$MODE" != "single" ]] && [[ "${MAX_PENDING_CIRCUITS:-128}" -lt 128 ]]; then
+        log "MAX_PENDING_CIRCUITS: ${MAX_PENDING_CIRCUITS} (auto-scaled for $INSTANCE_COUNT instances)"
+    else
+        log "MAX_PENDING_CIRCUITS: ${MAX_PENDING_CIRCUITS:-128}"
+    fi
     log "DNS_WILDCARD_DOMAIN: ${DNS_WILDCARD_DOMAIN:-tor.exit.validator.1aeo.com}"
     log "DNS_EXPECTED_IP: ${DNS_EXPECTED_IP:-64.65.4.1}"
     
@@ -680,9 +779,14 @@ main() {
     local end_time=$(date +%s)
     local duration=$((end_time - start_time))
     
-    # Cleanup old analysis directories
+    # Cleanup old analysis directories (keep last 3)
     if [[ "${CLEANUP_OLD:-true}" == "true" ]]; then
-        find "$OUTPUT_DIR" -maxdepth 1 -type d -name "analysis_*" -mtime +7 -exec rm -rf {} \; 2>/dev/null || true
+        local keep_count="${ANALYSIS_KEEP_COUNT:-3}"
+        local dirs_to_remove=$(ls -dt "$TMP_DIR"/analysis_* 2>/dev/null | tail -n +$((keep_count + 1)))
+        if [[ -n "$dirs_to_remove" ]]; then
+            echo "$dirs_to_remove" | xargs rm -rf 2>/dev/null || true
+            log "Cleaned up old analysis directories (keeping last $keep_count)"
+        fi
     fi
     
     log "=============================================="
@@ -692,18 +796,25 @@ main() {
     log "Exit code: $exit_code"
     log "Ended: $(date -Iseconds)"
     
-    # Log final statistics from latest.json if available
-    if [[ -f "$OUTPUT_DIR/latest.json" ]]; then
+    # Log final statistics only if this run produced a new report
+    local this_run_report="${OUTPUT_DIR}/dns_health_${TIMESTAMP}.json"
+    if [[ -f "$this_run_report" ]]; then
         log ""
         log "=== Final Results ==="
-        read_report_summary "$OUTPUT_DIR/latest.json" | while read line; do log "$line"; done
+        read_report_summary "$this_run_report" | while read line; do log "$line"; done
         log ""
-        log "Report: $OUTPUT_DIR/dns_health_${TIMESTAMP}.json"
+        log "Report: $this_run_report"
         log "Latest: $OUTPUT_DIR/latest.json"
+    elif [[ $exit_code -ne 0 ]]; then
+        log ""
+        log "=== No Results ==="
+        log "Run failed without producing results."
     fi
     
-    log "Log: $MAIN_LOG"
     log "=============================================="
+    
+    # Remove per-run log (already captured in cron.log)
+    rm -f "$MAIN_LOG"
     
     exit $exit_code
 }
