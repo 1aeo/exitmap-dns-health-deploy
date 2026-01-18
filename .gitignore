@@ -1,0 +1,29 @@
+# Config with secrets
+config.env
+
+# Generated files
+wrangler.toml
+pages-static/
+
+# Runtime directories
+logs/
+backups/
+public/*.json
+public/archives/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
