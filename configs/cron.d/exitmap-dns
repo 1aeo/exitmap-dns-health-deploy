@@ -1,28 +1,33 @@
-# exitmap DNS Health Validation - Cron Schedule
+# exitmap DNS Health Validation - Cron Configuration
 #
-# This cron job runs DNS health validation scans at scheduled intervals.
+# This file is a reference template. Use the install script to automatically
+# configure cron from your config.env settings:
 #
-# Installation:
-#   sudo cp /path/to/exitmap/configs/cron.d/exitmap-dns /etc/cron.d/
-#   sudo chmod 644 /etc/cron.d/exitmap-dns
+#   ./scripts/install-cron.sh           # Install cron entry
+#   ./scripts/install-cron.sh --dry-run # Preview without installing
 #
-# Edit the paths below to match your installation.
-
-# Environment
-SHELL=/bin/bash
-PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
-
-# Run DNS health validation every 6 hours
-# Format: minute hour day month weekday user command
-15 */6 * * * exitmap /home/exitmap/exitmap/deploy/scripts/run_dns_validation.sh >> /home/exitmap/exitmap/logs/cron.log 2>&1
-
-# Alternative schedules (uncomment one):
+# The script reads these values from config.env:
+#   - DEPLOY_PATH: Installation directory
+#   - CRON_SCHEDULE: Cron timing (default: "15 */2 * * *")
 #
-# Every 4 hours:
-# 15 */4 * * * exitmap /home/exitmap/exitmap/deploy/scripts/run_dns_validation.sh >> /home/exitmap/exitmap/logs/cron.log 2>&1
+# =============================================================================
+# Manual Installation (alternative)
+# =============================================================================
 #
-# Every 12 hours (at 6am and 6pm):
-# 15 6,18 * * * exitmap /home/exitmap/exitmap/deploy/scripts/run_dns_validation.sh >> /home/exitmap/exitmap/logs/cron.log 2>&1
+# User crontab (crontab -e):
+#   15 */2 * * * /path/to/exitmap-dns-health-deploy/scripts/run-dns-validation.sh -c 4 >> /path/to/exitmap-dns-health-deploy/logs/cron.log 2>&1
 #
-# Once daily at 3am:
-# 15 3 * * * exitmap /home/exitmap/exitmap/deploy/scripts/run_dns_validation.sh >> /home/exitmap/exitmap/logs/cron.log 2>&1
+# System cron.d (/etc/cron.d/exitmap-dns):
+#   SHELL=/bin/bash
+#   PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+#   15 */2 * * * username /path/to/exitmap-dns-health-deploy/scripts/run-dns-validation.sh -c 4 >> /path/to/exitmap-dns-health-deploy/logs/cron.log 2>&1
+#
+# =============================================================================
+# Schedule Options
+# =============================================================================
+#
+# Every 2 hours (default):  15 */2 * * *
+# Every 4 hours:            15 */4 * * *
+# Every 6 hours:            15 */6 * * *
+# Twice daily (6am/6pm):    15 6,18 * * *
+# Once daily (3am):         15 3 * * *
