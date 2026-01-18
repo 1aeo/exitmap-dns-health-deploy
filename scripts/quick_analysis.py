@@ -53,18 +53,31 @@ def load_results(results_dir: Path) -> list:
     return results
 
 
-def compute_latency_stats(latencies: list) -> dict:
-    """Compute latency statistics from a list of latency values."""
-    if not latencies:
-        return {}
-    latencies = sorted(latencies)
-    n = len(latencies)
+def _compute_single_stats(values: list) -> dict:
+    """Compute statistics from a list of values."""
+    if not values:
+        return None
+    values = sorted(values)
+    n = len(values)
     return {
-        "min": latencies[0],
-        "median": latencies[n // 2],
-        "p95": latencies[int(n * 0.95)],
-        "max": latencies[-1],
-        "avg": sum(latencies) // n
+        "min": values[0],
+        "median": values[n // 2],
+        "p95": values[int(n * 0.95)],
+        "max": values[-1],
+        "avg": sum(values) // n
+    }
+
+
+def compute_latency_stats(timings: list) -> dict:
+    """Compute latency statistics from a list of timing dicts."""
+    if not timings:
+        return {}
+    
+    # Extract total timing (includes Tor circuit + DNS resolution)
+    totals = [t.get("total_ms") for t in timings if t and t.get("total_ms") is not None]
+    
+    return {
+        "total": _compute_single_stats(totals),
     }
 
 
@@ -79,9 +92,9 @@ def analyze_results(results: list) -> dict:
     timeout = status_counts.get("timeout", 0)
     dns_fail = status_counts.get("dns_fail", 0)
     
-    # Latency stats for successes
-    latencies = [r.get("latency_ms") for r in results 
-                 if r.get("status") == "success" and r.get("latency_ms")]
+    # Timing stats for successes
+    timings = [r.get("timing") for r in results 
+               if r.get("status") == "success" and r.get("timing")]
     
     return {
         "total": total,
@@ -92,7 +105,7 @@ def analyze_results(results: list) -> dict:
         "timeout_rate": round(timeout / total * 100, 2) if total else 0,
         "failures": total - success,
         "status_breakdown": dict(status_counts),
-        "latency_stats": compute_latency_stats(latencies)
+        "timing_stats": compute_latency_stats(timings)
     }
 
 
@@ -124,6 +137,13 @@ def analyze_failures(results: list) -> dict:
     }
 
 
+def _fmt_timing_section(label: str, ts: dict) -> str:
+    """Format a timing stats section."""
+    if not ts:
+        return f"  {label}: (no data)"
+    return f"  {label}: Min {ts['min']:>6} ms | Median {ts['median']:>6} ms | P95 {ts['p95']:>6} ms | Max {ts['max']:>6} ms"
+
+
 def print_summary(stats: dict, run_name: str = ""):
     """Print human-readable summary."""
     print("=" * 70)
@@ -138,13 +158,10 @@ def print_summary(stats: dict, run_name: str = ""):
     print(f"\nSuccess Rate: {stats['success_rate']:.1f}%")
     print(f"Total Failures: {stats['failures']}")
     
-    if stats.get('latency_stats'):
-        ls = stats['latency_stats']
-        print(f"\nLatency (successful queries):")
-        print(f"  Min:    {ls['min']:>6} ms")
-        print(f"  Median: {ls['median']:>6} ms")
-        print(f"  P95:    {ls['p95']:>6} ms")
-        print(f"  Max:    {ls['max']:>6} ms")
+    ts = stats.get('timing_stats', {})
+    if ts:
+        print(f"\nTiming (successful queries):")
+        print(_fmt_timing_section("Total (circuit + DNS)", ts.get('total')))
 
 
 def print_failures(failure_analysis: dict):

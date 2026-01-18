@@ -13,8 +13,8 @@ const TTL = { latest: 60, historical: 31536000, default: 300 };
 const UNSAFE_PATH = /(?:^|\/)\.\.(?:\/|$)|%2e|%00|\x00/i;
 
 // Valid proxy paths pattern - strictly validate filenames
-// Matches: dns_health_YYYYMMDD_HHMMSS.json, latest.json, files.json, archives/exitmap-YYYYMM.tar.gz
-const PROXY_PATH = /^(?:archives\/exitmap-\d{6}\.tar\.gz|(?:dns_health_\d{8}_\d{6}|latest|files)\.json)$/;
+// Matches: dns_health_YYYY-MM-DD_HH-MM-SS.json, latest.json, files.json, archives/exitmap-YYYYMM.tar.gz
+const PROXY_PATH = /^(?:archives\/exitmap-\d{6}\.tar\.gz|(?:dns_health_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}|latest|files)\.json)$/;
 
 const getPath = (params) => {
   const p = Array.isArray(params.path) ? params.path.join('/') : (params.path || '');
@@ -27,7 +27,7 @@ const getPath = (params) => {
 const shouldProxy = (path) => path && PROXY_PATH.test(path);
 
 // Immutable files: timestamped validation files and archives (but not latest.json/files.json)
-const isImmutable = (path) => /^(?:dns_health_\d{8}_\d{6}\.json|archives\/)/.test(path);
+const isImmutable = (path) => /^(?:dns_health_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}\.json|archives\/)/.test(path);
 
 const getCacheTTL = (path, env) => {
   if (path === 'latest.json' || path === 'files.json') 

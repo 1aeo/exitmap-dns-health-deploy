@@ -93,8 +93,8 @@ def _extract_instance_detail(result):
     detail = {"status": status}
     
     # Copy relevant fields if present (avoids repetitive if-blocks)
-    # Keys included per status: attempt (always), latency_ms (all), resolved_ip, expected_ip, error
-    for key in ("attempt", "latency_ms", "resolved_ip", "expected_ip", "error"):
+    # Keys included per status: attempt (always), timing (all), resolved_ip, expected_ip, error
+    for key in ("attempt", "timing", "resolved_ip", "expected_ip", "error"):
         if result.get(key):
             detail[key] = result[key]
     
@@ -171,6 +171,17 @@ def cross_validate_results(source_dirs):
         else:
             cv_stats["consistency"]["mixed"] += 1
         
+        # Calculate average timing across successful instances
+        successful_timings = [
+            r.get("timing") for r in instance_results.values()
+            if r.get("status") == "success" and r.get("timing")
+        ]
+        if successful_timings:
+            # Average total timing
+            total_values = [t.get("total_ms") for t in successful_timings if t.get("total_ms") is not None]
+            avg_timing = {"total_ms": round(sum(total_values) / len(total_values)) if total_values else None}
+            best_result["timing"] = avg_timing
+        
         # Build CV details for this relay
         cv_detail = {
             "result_source": best_inst,
@@ -210,20 +221,45 @@ def cross_validate_results(source_dirs):
     return merged, cv_stats
 
 
-def compute_latency_stats(latencies):
-    """Compute latency statistics from a list of values (sorts in-place)."""
-    if not latencies:
-        return {"avg_ms": 0, "min_ms": 0, "max_ms": 0, "p50_ms": 0, "p95_ms": 0, "p99_ms": 0}
+def _compute_single_latency_stats(values):
+    """Compute statistics from a list of values (sorts in-place). Returns None if empty."""
+    if not values:
+        return None
     
-    latencies.sort()  # In-place sort to avoid creating new list
-    n = len(latencies)
+    values.sort()  # In-place sort to avoid creating new list
+    n = len(values)
     return {
-        "avg_ms": round(sum(latencies) / n),
-        "min_ms": latencies[0],
-        "max_ms": latencies[-1],
-        "p50_ms": latencies[n // 2],
-        "p95_ms": latencies[int(n * 0.95)],
-        "p99_ms": latencies[int(n * 0.99)],
+        "avg_ms": round(sum(values) / n),
+        "min_ms": values[0],
+        "max_ms": values[-1],
+        "p50_ms": values[n // 2],
+        "p95_ms": values[int(n * 0.95)],
+        "p99_ms": values[int(n * 0.99)],
+    }
+
+
+def compute_latency_stats(timings):
+    """
+    Compute latency statistics from a list of timing dicts.
+    
+    Args:
+        timings: List of timing dicts with {total_ms, socket_ms, dns_ms}
+    
+    Returns:
+        Dict with stats for each timing type: {total: {...}, socket: {...}, dns: {...}}
+    """
+    if not timings:
+        return {
+            "total": {"avg_ms": 0, "min_ms": 0, "max_ms": 0, "p50_ms": 0, "p95_ms": 0, "p99_ms": 0},
+            "socket": None,
+            "dns": None,
+        }
+    
+    # Extract total timing (includes Tor circuit + DNS resolution)
+    totals = [t.get("total_ms") for t in timings if t and t.get("total_ms") is not None]
+    
+    return {
+        "total": _compute_single_latency_stats(totals) or {"avg_ms": 0, "min_ms": 0, "max_ms": 0, "p50_ms": 0, "p95_ms": 0, "p99_ms": 0},
     }
 
 
@@ -243,7 +279,7 @@ def aggregate_results(results, previous_report=None):
 
     # Single-pass aggregation
     stats = Counter()
-    latencies = []
+    timings = []
     failures = []
     failures_by_ip = {}
 
@@ -255,8 +291,8 @@ def aggregate_results(results, previous_report=None):
         # Track consecutive failures
         if status == "success":
             r["consecutive_failures"] = 0
-            if r.get("latency_ms"):
-                latencies.append(r["latency_ms"])
+            if r.get("timing"):
+                timings.append(r["timing"])
         else:
             prev = prev_state.get(fp, {})
             prev_failures = prev.get("consecutive_failures", 0) if prev.get("status") != "success" else 0
@@ -275,7 +311,7 @@ def aggregate_results(results, previous_report=None):
     total = len(results)
     success = stats.get("success", 0)
     success_rate = (success / total * 100) if total else 0
-    lat_stats = compute_latency_stats(latencies)
+    timing_stats = compute_latency_stats(timings)
 
     return {
         "metadata": {
@@ -291,7 +327,7 @@ def aggregate_results(results, previous_report=None):
             "exception": stats.get("exception", 0),
             "unknown": stats.get("unknown", 0),
             "success_rate_percent": round(success_rate, 2),
-            "latency": lat_stats
+            "timing": timing_stats  # {total: {...}, socket: {...}, dns: {...}}
         },
         "results": results,
         "failures": failures,
@@ -299,10 +335,19 @@ def aggregate_results(results, previous_report=None):
     }
 
 
+def _fmt_timing_line(label, stats):
+    """Format a single timing stats line."""
+    if not stats:
+        return "  %s: (no data)" % label
+    return "  %s: Avg %d ms | Min %d ms | Max %d ms | P50 %d ms | P95 %d ms | P99 %d ms" % (
+        label, stats["avg_ms"], stats["min_ms"], stats["max_ms"],
+        stats["p50_ms"], stats["p95_ms"], stats["p99_ms"])
+
+
 def print_summary(report):
     """Print a human-readable summary."""
     m = report["metadata"]
-    lat = m["latency"]
+    timing = m.get("timing", {})
 
     print("\n" + "=" * 60)
     print("DNS HEALTH VALIDATION SUMMARY")
@@ -346,9 +391,8 @@ def print_summary(report):
                     inst_name, success, total, (success/total*100) if total else 0))
         print()
     
-    print("LATENCY STATISTICS (successful resolutions):")
-    print("  Average: %d ms | Min: %d ms | Max: %d ms" % (lat["avg_ms"], lat["min_ms"], lat["max_ms"]))
-    print("  P50: %d ms | P95: %d ms | P99: %d ms" % (lat["p50_ms"], lat["p95_ms"], lat["p99_ms"]))
+    print("TIMING STATISTICS (successful resolutions):")
+    print(_fmt_timing_line("Total (circuit + DNS)", timing.get("total")))
     print()
 
     failures = report["failures"]
