@@ -299,7 +299,8 @@ wait_for_scan() {
         local count=$(count_results "$analysis_dir")
         
         # Extract progress info from exitmap log
-        local progress_info=""
+        local probes_sent=""
+        local results_breakdown=""
         if [[ -f "$log_file" ]]; then
             # Get latest progress line: "Probed X out of Y exit relays, so we are Z% done."
             local progress_line=$(grep -oP 'Probed \d+ out of \d+ exit relays.*done' "$log_file" 2>/dev/null | tail -1)
@@ -315,7 +316,8 @@ wait_for_scan() {
                 local total_failed=$(grep -c '\[FAILED\]' "$log_file" 2>/dev/null || echo 0)
                 
                 if [[ -n "$probed" ]] && [[ -n "$total" ]]; then
-                    progress_info="${probed}/${total} (${pct:-?}%) | ${total_ok}ok/${total_timeout}to/${total_failed}fail"
+                    probes_sent="${probed}/${total} (${pct:-?}%) probes sent"
+                    results_breakdown="${total_ok}ok/${total_timeout}to/${total_failed}fail"
                 fi
             fi
         fi
@@ -329,17 +331,19 @@ wait_for_scan() {
             fi
             # Show stall warning with time remaining
             local stall_remain=$((120 - stall_time))
-            if [[ -n "$progress_info" ]]; then
-                log "$instance_name: Scanning... $count results (${elapsed}s) [stalled ${stall_time}s, ${stall_remain}s to timeout] | $progress_info"
+            # Order: probes sent | results | stalled | breakdown
+            if [[ -n "$probes_sent" ]]; then
+                log "$instance_name: Scanning... | $probes_sent | $count probe results (${elapsed}s) [stalled ${stall_time}s, ${stall_remain}s to timeout] | $results_breakdown"
             else
-                log "$instance_name: Scanning... $count results (${elapsed}s) [stalled ${stall_time}s, ${stall_remain}s to timeout]"
+                log "$instance_name: Scanning... $count probe results (${elapsed}s) [stalled ${stall_time}s, ${stall_remain}s to timeout]"
             fi
         else
             stall_time=0
-            if [[ -n "$progress_info" ]]; then
-                log "$instance_name: Scanning... $count results (${elapsed}s) | $progress_info"
+            # Order: probes sent | results | breakdown
+            if [[ -n "$probes_sent" ]]; then
+                log "$instance_name: Scanning... | $probes_sent | $count probe results (${elapsed}s) | $results_breakdown"
             else
-                log "$instance_name: Scanning... $count results (${elapsed}s)"
+                log "$instance_name: Scanning... $count probe results (${elapsed}s)"
             fi
         fi
         last_count=$count
