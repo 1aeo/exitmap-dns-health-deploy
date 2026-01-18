@@ -310,10 +310,13 @@ wait_for_scan() {
                 local total=$(echo "$progress_line" | grep -oP 'out of \K\d+')
                 local pct=$(echo "$progress_line" | grep -oP '\d+\.\d+(?=% done)')
                 
-                # Count totals from entire log
-                local total_ok=$(grep -c '(correct)' "$log_file" 2>/dev/null || echo 0)
-                local total_timeout=$(grep -c '\[timeout\]' "$log_file" 2>/dev/null || echo 0)
-                local total_failed=$(grep -c '\[FAILED\]' "$log_file" 2>/dev/null || echo 0)
+                # Count totals from entire log (tr -d strips any stray newlines/CRs)
+                local total_ok=$(grep -c '(correct)' "$log_file" 2>/dev/null | tr -d '\n\r' || echo 0)
+                local total_timeout=$(grep -c '\[timeout\]' "$log_file" 2>/dev/null | tr -d '\n\r' || echo 0)
+                local total_failed=$(grep -c '\[FAILED\]' "$log_file" 2>/dev/null | tr -d '\n\r' || echo 0)
+                [[ -z "$total_ok" ]] && total_ok=0
+                [[ -z "$total_timeout" ]] && total_timeout=0
+                [[ -z "$total_failed" ]] && total_failed=0
                 
                 if [[ -n "$probed" ]] && [[ -n "$total" ]]; then
                     probes_sent="${probed}/${total} (${pct:-?}%) probes sent"
