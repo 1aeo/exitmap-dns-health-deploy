@@ -372,6 +372,7 @@ wait_for_scan() {
             if [[ "$probed" -gt 0 ]] && [[ "$total" -gt 0 ]]; then
                 probes_sent="${probed}/${total} (${pct}%) probes sent"
                 results_breakdown="${total_ok}ok/${total_timeout}to/${total_failed}fail"
+                results_pct=$(awk "BEGIN {printf \"%.2f\", $count * 100 / $total}")
             fi
         fi
         
@@ -386,17 +387,17 @@ wait_for_scan() {
             local stall_remain=$((SCAN_STALL_TIMEOUT - stall_time))
             # Order: probes sent | results | stalled | breakdown
             if [[ -n "$probes_sent" ]]; then
-                log "$instance_name: Scanning... | $probes_sent | $count probe results (${elapsed}s) [stalled ${stall_time}s, ${stall_remain}s to timeout] | $results_breakdown"
+                log "$instance_name: Scanning... | $probes_sent | $count/$total (${results_pct}%) probes received (${elapsed}s) [stalled ${stall_time}s, ${stall_remain}s to timeout] | $results_breakdown"
             else
-                log "$instance_name: Scanning... $count probe results (${elapsed}s) [stalled ${stall_time}s, ${stall_remain}s to timeout]"
+                log "$instance_name: Scanning... $count probes received (${elapsed}s) [stalled ${stall_time}s, ${stall_remain}s to timeout]"
             fi
         else
             stall_time=0
             # Order: probes sent | results | breakdown
             if [[ -n "$probes_sent" ]]; then
-                log "$instance_name: Scanning... | $probes_sent | $count probe results (${elapsed}s) | $results_breakdown"
+                log "$instance_name: Scanning... | $probes_sent | $count/$total (${results_pct}%) probes received (${elapsed}s) | $results_breakdown"
             else
-                log "$instance_name: Scanning... $count probe results (${elapsed}s)"
+                log "$instance_name: Scanning... $count probes received (${elapsed}s)"
             fi
         fi
         last_count=$count
