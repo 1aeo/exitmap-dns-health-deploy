@@ -118,6 +118,14 @@ TOR_BOOTSTRAP_TIMEOUT="${TOR_BOOTSTRAP_TIMEOUT:-90}"
 TOR_MAX_BOOTSTRAP_RETRIES="${TOR_MAX_BOOTSTRAP_RETRIES:-3}"
 TOR_PROGRESS_CHECK_INTERVAL="${TOR_PROGRESS_CHECK_INTERVAL:-10}"
 
+# Timing constants
+INSTANCE_STAGGER_DELAY=5
+RETRY_WAIT_SECONDS=10
+SCAN_STALL_TIMEOUT=120
+
+# Persistent cache for Tor consensus/descriptors (survives exitmap cleanup)
+TOR_CACHE_DIR="$TMP_DIR/tor_cache"
+
 # Validate exitmap installation
 EXITMAP_BIN="$EXITMAP_DIR/bin/exitmap"
 if [[ ! -f "$EXITMAP_BIN" ]]; then
@@ -248,10 +256,39 @@ cleanup_all() {
     rm -f /tmp/exitmap_fps_*.txt 2>/dev/null || true
 }
 
+# Helper: Save cached Tor files to persistent storage
+save_tor_cache() {
+    local tor_dir=$1
+    [[ -d "$tor_dir" ]] || return 0
+    mkdir -p "$TOR_CACHE_DIR"
+    # Copy non-empty cached files (glob is faster than find for few files)
+    for f in "$tor_dir"/cached-*; do
+        [[ -s "$f" ]] && cp -p "$f" "$TOR_CACHE_DIR/"
+    done 2>/dev/null || true
+}
+
+# Helper: Restore cached Tor files from persistent storage
+restore_tor_cache() {
+    local tor_dir=$1
+    [[ -d "$TOR_CACHE_DIR" ]] || return 0
+    mkdir -p "$tor_dir"
+    cp -p "$TOR_CACHE_DIR"/cached-* "$tor_dir/" 2>/dev/null || true
+}
+
+# Helper: Prepare tor directory (cleanup + create + restore cache)
+prepare_tor_dir() {
+    local tor_dir=$1
+    cleanup_instance "$tor_dir"
+    mkdir -p "$tor_dir"
+    chmod 700 "$tor_dir"
+    restore_tor_cache "$tor_dir"
+}
+
 # Wait for bootstrap completion
 wait_for_bootstrap() {
     local log_file=$1
     local instance_name=$2
+    local tor_dir="${3:-}"  # Optional tor_dir for cache saving
     local start_time=$(date +%s)
     
     while true; do
@@ -263,14 +300,16 @@ wait_for_bootstrap() {
         local log_status=""
         [[ -f "$log_file" ]] && log_status=$(grep -E '(Successfully started Tor|Couldn.t launch Tor|Bootstrapped [0-9]+)' "$log_file" 2>/dev/null | tail -5)
         
-        # Check for successful bootstrap
-        if echo "$log_status" | grep -q "Successfully started Tor"; then
+        # Check for successful bootstrap (bash pattern match - no subprocess)
+        if [[ "$log_status" == *"Successfully started Tor"* ]]; then
             log "$instance_name: Bootstrap complete (${elapsed}s)"
+            # Save cache immediately after bootstrap
+            [[ -n "$tor_dir" ]] && save_tor_cache "$tor_dir"
             return 0
         fi
         
         # Check for bootstrap failure
-        if echo "$log_status" | grep -q "Couldn't launch Tor"; then
+        if [[ "$log_status" == *"Couldn't launch Tor"* ]]; then
             log "$instance_name: Bootstrap failed"
             return 1
         fi
@@ -336,15 +375,15 @@ wait_for_scan() {
             fi
         fi
         
-        # Check for stall (no new results for 2 minutes after getting some)
+        # Check for stall (no new results after getting some)
         if [ "$count" -eq "$last_count" ] && [ "$count" -gt 0 ]; then
             stall_time=$((stall_time + TOR_PROGRESS_CHECK_INTERVAL))
-            if [ $stall_time -ge 120 ]; then
+            if [ $stall_time -ge "$SCAN_STALL_TIMEOUT" ]; then
                 log "$instance_name: Scan appears stalled, considering complete"
                 return 0
             fi
             # Show stall warning with time remaining
-            local stall_remain=$((120 - stall_time))
+            local stall_remain=$((SCAN_STALL_TIMEOUT - stall_time))
             # Order: probes sent | results | stalled | breakdown
             if [[ -n "$probes_sent" ]]; then
                 log "$instance_name: Scanning... | $probes_sent | $count probe results (${elapsed}s) [stalled ${stall_time}s, ${stall_remain}s to timeout] | $results_breakdown"
@@ -398,10 +437,8 @@ run_instance() {
     for attempt in $(seq 1 "$TOR_MAX_BOOTSTRAP_RETRIES"); do
         log "$instance_name: Attempt $attempt/$TOR_MAX_BOOTSTRAP_RETRIES"
         
-        # Clean up tor directory
-        cleanup_instance "$tor_dir"
-        mkdir -p "$tor_dir"
-        chmod 700 "$tor_dir"
+        # Prepare tor directory (cleanup + create + restore cache)
+        prepare_tor_dir "$tor_dir"
         
         # Start exitmap (append to log file so script messages aren't overwritten)
         # PYTHONUNBUFFERED=1 forces immediate output so progress lines are visible in real-time
@@ -409,7 +446,7 @@ run_instance() {
         local pid=$!
         
         # Wait for bootstrap
-        if wait_for_bootstrap "$log_file" "$instance_name"; then
+        if wait_for_bootstrap "$log_file" "$instance_name" "$tor_dir"; then
             # Bootstrap succeeded, wait for scan
             wait_for_scan "$log_file" "$analysis_dir" "$instance_name"
             # Kill the process after scan completes or stalls (it may still be running)
@@ -430,8 +467,8 @@ run_instance() {
         cleanup_instance "$tor_dir"
         
         if [ $attempt -lt "$TOR_MAX_BOOTSTRAP_RETRIES" ]; then
-            log "$instance_name: Waiting 10s before retry..."
-            sleep 10
+            log "$instance_name: Waiting ${RETRY_WAIT_SECONDS}s before retry..."
+            sleep "$RETRY_WAIT_SECONDS"
         fi
     done
     
@@ -590,7 +627,7 @@ start_parallel_instances() {
         INSTANCE_PIDS+=($!)
         
         # Stagger starts to avoid thundering herd
-        [[ $i -lt $n ]] && sleep 5
+        [[ $i -lt $n ]] && sleep "$INSTANCE_STAGGER_DELAY"
     done
     
     log "Started $n ${mode_prefix} instances (PIDs: ${INSTANCE_PIDS[*]})"
@@ -666,10 +703,7 @@ run_split() {
     local temp_tor_dir="$TMP_DIR/exitmap_tor_temp"
     local temp_log="$TMP_DIR/bootstrap_temp.log"
     
-    cleanup_instance "$temp_tor_dir"
-    mkdir -p "$temp_tor_dir"
-    chmod 700 "$temp_tor_dir"
-    
+    prepare_tor_dir "$temp_tor_dir"
     activate_venv
     
     # Quick bootstrap to get consensus
