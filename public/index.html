@@ -304,6 +304,7 @@
         .status-chip.timeout { background: rgba(210, 153, 34, 0.15); color: var(--status-warning); }
         .status-chip.hard_timeout { background: rgba(210, 153, 34, 0.15); color: var(--status-warning); }
         .status-chip.wrong_ip { background: rgba(163, 113, 247, 0.15); color: var(--status-purple); }
+        .status-chip.relay_unreachable { background: rgba(210, 153, 34, 0.15); color: var(--status-warning); }
         .status-chip.exception { background: rgba(139, 148, 158, 0.15); color: var(--aeo-text-muted); }
         .status-chip.socks_error { background: rgba(139, 148, 158, 0.15); color: var(--aeo-text-muted); }
         .status-chip.network_error { background: rgba(139, 148, 158, 0.15); color: var(--aeo-text-muted); }
@@ -384,6 +385,7 @@
         .status-badge.timeout { background: rgba(210, 153, 34, 0.2); color: var(--status-warning); }
         .status-badge.hard_timeout { background: rgba(210, 153, 34, 0.2); color: var(--status-warning); }
         .status-badge.wrong_ip { background: rgba(163, 113, 247, 0.2); color: var(--status-purple); }
+        .status-badge.relay_unreachable { background: rgba(210, 153, 34, 0.2); color: var(--status-warning); }
         .status-badge.socks_error { background: rgba(139, 148, 158, 0.2); color: var(--aeo-text-muted); }
         .status-badge.network_error { background: rgba(139, 148, 158, 0.2); color: var(--aeo-text-muted); }
         .status-badge.error { background: rgba(139, 148, 158, 0.2); color: var(--aeo-text-muted); }
@@ -755,10 +757,14 @@
                 const data = await response.json();
                 const meta = data.metadata || {};
                 
-                const total = meta.total_relays || 0;
+                // New relay count fields (with backwards compatibility)
+                const consensusRelays = meta.consensus_relays || meta.total_relays || 0;
+                const testedRelays = meta.tested_relays || meta.total_relays || 0;
+                const relayUnreachable = meta.relay_unreachable || 0;
                 const success = meta.success || 0;
-                const successRate = meta.success_rate_percent || 0;
-                const failures = total - success;
+                const dnsSuccessRate = meta.dns_success_rate_percent || meta.success_rate_percent || 0;
+                const reachabilityRate = meta.reachability_success_rate_percent || 100;
+                const dnsFailed = testedRelays - success;
                 const cv = meta.cross_validation || {};
                 
                 // Update timestamp in header
@@ -771,20 +777,20 @@
                     <!-- Key Metrics -->
                     <div class="metrics-grid">
                         <div class="metric-item">
-                            <div class="metric-value info">${total.toLocaleString()}</div>
-                            <div class="metric-label">Total Relays</div>
+                            <div class="metric-value info">${consensusRelays.toLocaleString()}</div>
+                            <div class="metric-label">Consensus Relays</div>
+                        </div>
+                        <div class="metric-item">
+                            <div class="metric-value ${reachabilityRate >= 90 ? 'success' : reachabilityRate >= 75 ? 'warning' : 'error'}">${testedRelays.toLocaleString()}</div>
+                            <div class="metric-label">Tested (${reachabilityRate.toFixed(1)}%)</div>
                         </div>
                         <div class="metric-item">
                             <div class="metric-value success">${success.toLocaleString()}</div>
-                            <div class="metric-label">Successful</div>
+                            <div class="metric-label">DNS Success</div>
                         </div>
                         <div class="metric-item">
-                            <div class="metric-value ${failures > 0 ? 'error' : 'success'}">${failures.toLocaleString()}</div>
-                            <div class="metric-label">Failed</div>
-                        </div>
-                        <div class="metric-item">
-                            <div class="metric-value ${successRate >= 95 ? 'success' : successRate >= 80 ? 'warning' : 'error'}">${successRate.toFixed(1)}%</div>
-                            <div class="metric-label">Success Rate</div>
+                            <div class="metric-value ${dnsSuccessRate >= 95 ? 'success' : dnsSuccessRate >= 80 ? 'warning' : 'error'}">${dnsSuccessRate.toFixed(1)}%</div>
+                            <div class="metric-label">DNS Success Rate</div>
                         </div>
                     </div>
                 `;
@@ -818,11 +824,13 @@
                     wrong_ip: 'var(--status-purple)',
                     socks_error: 'var(--aeo-text-muted)',
                     network_error: 'var(--aeo-text-muted)',
-                    error: 'var(--aeo-text-muted)'
+                    error: 'var(--aeo-text-muted)',
+                    relay_unreachable: 'var(--status-warning)'
                 };
                 
                 const statusCounts = {
                     success: meta.success || 0,
+                    relay_unreachable: meta.relay_unreachable || 0,
                     timeout: meta.timeout || 0,
                     dns_fail: meta.dns_fail || 0,
                     exception: meta.exception || 0,
@@ -910,7 +918,7 @@
                             <td><strong>${escapeHtml(f.exit_nickname || 'Unknown')}</strong></td>
                             <td class="fingerprint" title="${f.exit_fingerprint || ''}">${f.exit_fingerprint || ''}</td>
                             <td><span class="status-badge ${f.status || 'error'}">${f.status || 'error'}</span></td>
-                            <td style="color: var(--aeo-text-muted); font-size: 0.8rem;">${escapeHtml((f.error || '').slice(0, 50))}</td>
+                            <td style="color: var(--aeo-text-muted); font-size: 0.8rem;" title="${escapeHtml(f.error || '')}">${escapeHtml((f.error || '').slice(0, 80))}${(f.error || '').length > 80 ? '...' : ''}</td>
                         </tr>
                     `).join('');
                     

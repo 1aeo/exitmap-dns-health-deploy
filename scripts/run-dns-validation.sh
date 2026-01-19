@@ -24,7 +24,8 @@ ulimit -n 131072 2>/dev/null || true
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEPLOY_DIR="$(dirname "$SCRIPT_DIR")"
-EXITMAP_DIR="$(dirname "$DEPLOY_DIR")"
+# Exitmap is a sibling directory to the deploy dir
+EXITMAP_DIR="${EXITMAP_DIR:-$(dirname "$DEPLOY_DIR")/exitmap}"
 
 # Parse command line arguments
 MODE="single"
@@ -76,8 +77,9 @@ else
 fi
 
 # Default configuration
-OUTPUT_DIR="${OUTPUT_DIR:-$EXITMAP_DIR/results}"
-LOG_DIR="${LOG_DIR:-$EXITMAP_DIR/logs}"
+# Use DEPLOY_DIR for outputs (not EXITMAP_DIR which may not exist as expected)
+OUTPUT_DIR="${OUTPUT_DIR:-$DEPLOY_DIR/public}"
+LOG_DIR="${LOG_DIR:-$DEPLOY_DIR/logs}"
 TMP_DIR="${TMP_DIR:-$DEPLOY_DIR/tmp}"
 BUILD_DELAY="${BUILD_DELAY:-0}"
 DELAY_NOISE="${DELAY_NOISE:-0}"
@@ -134,11 +136,12 @@ fi
 
 TIMESTAMP=$(date +%Y-%m-%d_%H-%M-%S)
 LOCK_FILE="/tmp/exitmap_dns_health.lock"
-MAIN_LOG="$LOG_DIR/dns_validation_${TIMESTAMP}.log"
+# Single unified log file for both script and exitmap output
+UNIFIED_LOG="$LOG_DIR/validation_${TIMESTAMP}.log"
 
-# Logging helper
+# Logging helper - writes to unified log
 log() { 
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] $1" | tee -a "$MAIN_LOG"
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] $1" | tee -a "$UNIFIED_LOG"
 }
 
 # Helper: Count result files in directory
@@ -164,8 +167,17 @@ import json, sys
 try:
     with open('$report_file') as f:
         m = json.load(f)['metadata']
-        print(f\"Total relays: {m['total_relays']}\")
-        print(f\"Success: {m['success']} ({m['success_rate_percent']}%)\")
+        # Relay counts
+        consensus = m.get('consensus_relays', m.get('total_relays', 0))
+        tested = m.get('tested_relays', m.get('total_relays', 0))
+        unreachable = m.get('relay_unreachable', 0)
+        print(f\"Consensus relays: {consensus}\")
+        print(f\"Tested (reachable): {tested} ({m.get('reachability_success_rate_percent', 100):.2f}%)\")
+        if unreachable > 0:
+            print(f\"Relay Unreachable: {unreachable}\")
+        # DNS results
+        dns_rate = m.get('dns_success_rate_percent', m.get('success_rate_percent', 0))
+        print(f\"Success: {m['success']} ({dns_rate}%)\")
         print(f\"DNS Fail: {m['dns_fail']}\")
         print(f\"Timeout: {m['timeout']}\")
         print(f\"Wrong IP: {m['wrong_ip']}\")
@@ -302,26 +314,25 @@ wait_for_scan() {
         local probes_sent=""
         local results_breakdown=""
         if [[ -f "$log_file" ]]; then
-            # Get latest progress line: "Probed X out of Y exit relays, so we are Z% done."
-            local progress_line=$(grep -oP 'Probed \d+ out of \d+ exit relays.*done' "$log_file" 2>/dev/null | tail -1)
-            if [[ -n "$progress_line" ]]; then
-                # Extract probed/total/percentage
-                local probed=$(echo "$progress_line" | grep -oP 'Probed \K\d+')
-                local total=$(echo "$progress_line" | grep -oP 'out of \K\d+')
-                local pct=$(echo "$progress_line" | grep -oP '\d+\.\d+(?=% done)')
-                
-                # Count totals from entire log (tr -d strips any stray newlines/CRs)
-                local total_ok=$(grep -c '(correct)' "$log_file" 2>/dev/null | tr -d '\n\r' || echo 0)
-                local total_timeout=$(grep -c '\[timeout\]' "$log_file" 2>/dev/null | tr -d '\n\r' || echo 0)
-                local total_failed=$(grep -c '\[FAILED\]' "$log_file" 2>/dev/null | tr -d '\n\r' || echo 0)
-                [[ -z "$total_ok" ]] && total_ok=0
-                [[ -z "$total_timeout" ]] && total_timeout=0
-                [[ -z "$total_failed" ]] && total_failed=0
-                
-                if [[ -n "$probed" ]] && [[ -n "$total" ]]; then
-                    probes_sent="${probed}/${total} (${pct:-?}%) probes sent"
-                    results_breakdown="${total_ok}ok/${total_timeout}to/${total_failed}fail"
-                fi
+            # Single awk pass: extract progress info AND count results
+            read probed total pct total_ok total_timeout total_failed <<< $(awk '
+                /Probed [0-9]+ out of [0-9]+ exit relays.*% done/ {
+                    # Extract: "Probed 123 out of 456 exit relays, so we are 27.00% done."
+                    for (i=1; i<=NF; i++) {
+                        if ($i == "Probed") probed = $(i+1)
+                        if ($i == "of") total = $(i+1)
+                        if ($i ~ /^[0-9]+\.[0-9]+%$/) pct = substr($i, 1, length($i)-1)
+                    }
+                }
+                /(correct)/ { ok++ }
+                /\[timeout\]/ { to++ }
+                /\[FAILED\]/ { fail++ }
+                END { print probed+0, total+0, pct+0, ok+0, to+0, fail+0 }
+            ' "$log_file" 2>/dev/null)
+            
+            if [[ "$probed" -gt 0 ]] && [[ "$total" -gt 0 ]]; then
+                probes_sent="${probed}/${total} (${pct}%) probes sent"
+                results_breakdown="${total_ok}ok/${total_timeout}to/${total_failed}fail"
             fi
         fi
         
@@ -392,8 +403,9 @@ run_instance() {
         mkdir -p "$tor_dir"
         chmod 700 "$tor_dir"
         
-        # Start exitmap
-        $cmd > "$log_file" 2>&1 &
+        # Start exitmap (append to log file so script messages aren't overwritten)
+        # PYTHONUNBUFFERED=1 forces immediate output so progress lines are visible in real-time
+        PYTHONUNBUFFERED=1 $cmd >> "$log_file" 2>&1 &
         local pid=$!
         
         # Wait for bootstrap
@@ -518,7 +530,7 @@ finalize_report() {
     # Display summary
     echo ""
     echo "Summary:"
-    read_report_summary "$report_file" | head -5 | sed 's/^/  /'
+    read_report_summary "$report_file" | head -8 | sed 's/^/  /'
     echo ""
 }
 
@@ -549,7 +561,7 @@ do_uploads() {
 }
 
 # Helper: Start N parallel instances
-# Sets global arrays: INSTANCE_PIDS, INSTANCE_ANALYSIS_DIRS
+# Sets global arrays: INSTANCE_PIDS, INSTANCE_ANALYSIS_DIRS, INSTANCE_LOGS
 # Args: mode_prefix instance_count [use_exit_files]
 start_parallel_instances() {
     local mode_prefix=$1
@@ -558,13 +570,16 @@ start_parallel_instances() {
     
     INSTANCE_PIDS=()
     INSTANCE_ANALYSIS_DIRS=()
+    INSTANCE_LOGS=()
     
     for i in $(seq 1 $n); do
         local tor_dir="$TMP_DIR/exitmap_tor_$i"
         local analysis_dir="${TMP_DIR}/analysis_${TIMESTAMP}_${mode_prefix}$i"
-        local log_file="$LOG_DIR/exitmap_${TIMESTAMP}_${mode_prefix}$i.log"
+        # Temp log for progress tracking (merged into unified log after completion)
+        local log_file="$TMP_DIR/exitmap_${mode_prefix}$i.log"
         
         INSTANCE_ANALYSIS_DIRS+=("$analysis_dir")
+        INSTANCE_LOGS+=("$log_file")
         
         if $use_exit_files; then
             local exit_file="${FPS_BASE}.$i"
@@ -583,6 +598,7 @@ start_parallel_instances() {
 
 # Helper: Wait for all parallel instances to complete
 # Returns 0 if any succeeded, 1 if all failed
+# Also merges instance logs into unified log
 wait_parallel_instances() {
     local mode_prefix=$1
     local any_success=false
@@ -594,6 +610,14 @@ wait_parallel_instances() {
         [[ $exit_code -eq 0 ]] && any_success=true
     done
     
+    # Merge instance logs into unified log and clean up
+    for log_file in "${INSTANCE_LOGS[@]}"; do
+        if [[ -f "$log_file" ]]; then
+            cat "$log_file" >> "$UNIFIED_LOG"
+            rm -f "$log_file"
+        fi
+    done
+    
     $any_success
 }
 
@@ -601,7 +625,8 @@ wait_parallel_instances() {
 run_single() {
     local tor_dir="$TMP_DIR/exitmap_tor"
     local analysis_dir="${TMP_DIR}/analysis_${TIMESTAMP}"
-    local log_file="$LOG_DIR/exitmap_${TIMESTAMP}.log"
+    # Use unified log directly for single instance mode
+    local log_file="$UNIFIED_LOG"
     
     log "=== Single Instance Mode ==="
     
@@ -639,7 +664,7 @@ run_split() {
     # First, bootstrap a temporary Tor to get the relay list
     log "Bootstrapping Tor to get relay list..."
     local temp_tor_dir="$TMP_DIR/exitmap_tor_temp"
-    local temp_log="$LOG_DIR/exitmap_${TIMESTAMP}_temp.log"
+    local temp_log="$TMP_DIR/bootstrap_temp.log"
     
     cleanup_instance "$temp_tor_dir"
     mkdir -p "$temp_tor_dir"
@@ -821,8 +846,7 @@ main() {
     
     log "=============================================="
     
-    # Remove per-run log (already captured in cron.log)
-    rm -f "$MAIN_LOG"
+    # Unified log is kept at: $UNIFIED_LOG
     
     exit $exit_code
 }

@@ -28,6 +28,7 @@ STATUS_PRIORITY = {
     "timeout": 6,      # Often transient
     "exception": 7,
     "unknown": 8,
+    "relay_unreachable": 9,  # Circuit failure - not DNS test result
 }
 
 
@@ -39,6 +40,39 @@ def _load_json_file(fpath):
     except Exception as e:
         print("Warning: Could not read %s: %s" % (fpath, e))
         return None
+
+
+def _find_json_files(directory, filename, recursive=False):
+    """
+    Find all instances of a specific JSON file in directory.
+    
+    Args:
+        directory: Root directory to search
+        filename: Name of file to find (e.g., "scan_stats.json")
+        recursive: If True, search all subdirectories
+    
+    Yields:
+        Full paths to matching files
+    """
+    if not os.path.isdir(directory):
+        return
+    
+    if recursive:
+        for root, _, files in os.walk(directory):
+            if filename in files:
+                yield os.path.join(root, filename)
+    else:
+        # Check nested timestamp directories first
+        for entry in os.listdir(directory):
+            subdir = os.path.join(directory, entry)
+            if os.path.isdir(subdir):
+                fpath = os.path.join(subdir, filename)
+                if os.path.exists(fpath):
+                    yield fpath
+        # Also check root directory
+        fpath = os.path.join(directory, filename)
+        if os.path.exists(fpath):
+            yield fpath
 
 
 def _iter_result_files(directory, recursive=False):
@@ -55,6 +89,36 @@ def _iter_result_files(directory, recursive=False):
         for fname in os.listdir(directory):
             if fname.startswith("dnshealth_") and fname.endswith(".json"):
                 yield os.path.join(directory, fname)
+
+
+def load_scan_stats(directory, recursive=False):
+    """Load scan_stats.json from directory, returning aggregated stats."""
+    totals = {"total_circuits": 0, "successful_circuits": 0, "failed_circuits": 0}
+    
+    for fpath in _find_json_files(directory, "scan_stats.json", recursive):
+        data = _load_json_file(fpath)
+        if data:
+            for key in totals:
+                totals[key] += data.get(key, 0)
+            print("Loaded scan stats from %s: %d total, %d successful, %d failed" % (
+                fpath, data.get("total_circuits", 0), 
+                data.get("successful_circuits", 0), 
+                data.get("failed_circuits", 0)))
+    
+    return totals
+
+
+def load_circuit_failures(directory, recursive=False):
+    """Load circuit_failures.json from directory, returning list of failure entries."""
+    failures = []
+    
+    for fpath in _find_json_files(directory, "circuit_failures.json", recursive):
+        data = _load_json_file(fpath)
+        if data and isinstance(data, list):
+            failures.extend(data)
+            print("Loaded %d circuit failures with fingerprints from %s" % (len(data), fpath))
+    
+    return failures
 
 
 def load_results(input_dir):
@@ -263,7 +327,7 @@ def compute_latency_stats(timings):
     }
 
 
-def aggregate_results(results, previous_report=None):
+def aggregate_results(results, previous_report=None, circuit_failures=None, scan_stats=None):
     """Aggregate results into a summary report (single pass)."""
     # Load previous state for consecutive failure tracking
     prev_state = {}
@@ -276,6 +340,22 @@ def aggregate_results(results, previous_report=None):
                         prev_state[fp] = r
         except Exception as e:
             print("Warning: Could not load previous report: %s" % e)
+
+    # Merge circuit failures into results (if any)
+    # Track which fingerprints we've already seen from DNS results
+    dns_fingerprints = {r.get("exit_fingerprint") for r in results}
+    circuit_failure_reasons = Counter()
+    
+    if circuit_failures:
+        for cf in circuit_failures:
+            fp = cf.get("exit_fingerprint")
+            # Only add if not already in DNS results (avoid duplicates)
+            if fp and fp not in dns_fingerprints:
+                results.append(cf)
+                dns_fingerprints.add(fp)
+            # Track circuit failure reasons
+            reason = cf.get("circuit_reason", "circuit_failed")
+            circuit_failure_reasons[reason] += 1
 
     # Single-pass aggregation
     stats = Counter()
@@ -308,15 +388,39 @@ def aggregate_results(results, previous_report=None):
                 "error": r.get("error")
             })
 
-    total = len(results)
+    # Calculate totals and rates
+    # Use scan_stats if available (source of truth for circuit counts)
+    if scan_stats and scan_stats.get("total_circuits", 0) > 0:
+        consensus_relays = scan_stats["total_circuits"]
+        relay_unreachable = scan_stats["failed_circuits"]
+        tested_relays = scan_stats["successful_circuits"]
+        print("Using scan_stats: %d consensus, %d tested, %d unreachable" % (
+            consensus_relays, tested_relays, relay_unreachable))
+    else:
+        # Fallback to counting from results
+        total = len(results)
+        relay_unreachable = stats.get("relay_unreachable", 0)
+        tested_relays = total - relay_unreachable
+        consensus_relays = total
+    
     success = stats.get("success", 0)
-    success_rate = (success / total * 100) if total else 0
+    
+    # Two success rates per plan
+    dns_success_rate = (success / tested_relays * 100) if tested_relays else 0
+    reachability_success_rate = (tested_relays / consensus_relays * 100) if consensus_relays else 0
+    
     timing_stats = compute_latency_stats(timings)
 
     return {
         "metadata": {
             "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-            "total_relays": total,
+            # New relay count fields
+            "consensus_relays": consensus_relays,
+            "tested_relays": tested_relays,
+            "relay_unreachable": relay_unreachable,
+            # Keep total_relays for backwards compatibility
+            "total_relays": tested_relays,
+            # Status counts
             "success": success,
             "wrong_ip": stats.get("wrong_ip", 0),
             "dns_fail": stats.get("dns_fail", 0),
@@ -326,8 +430,15 @@ def aggregate_results(results, previous_report=None):
             "network_error": stats.get("network_error", 0),
             "exception": stats.get("exception", 0),
             "unknown": stats.get("unknown", 0),
-            "success_rate_percent": round(success_rate, 2),
-            "timing": timing_stats  # {total: {...}, socket: {...}, dns: {...}}
+            # Two success rates
+            "dns_success_rate_percent": round(dns_success_rate, 2),
+            "reachability_success_rate_percent": round(reachability_success_rate, 2),
+            # Keep old name for backwards compatibility
+            "success_rate_percent": round(dns_success_rate, 2),
+            # Timing stats
+            "timing": timing_stats,
+            # Circuit failure breakdown (if any)
+            "circuit_failure_reasons": dict(circuit_failure_reasons) if circuit_failure_reasons else None,
         },
         "results": results,
         "failures": failures,
@@ -353,10 +464,20 @@ def print_summary(report):
     print("DNS HEALTH VALIDATION SUMMARY")
     print("=" * 60)
     print("Timestamp: %s" % m["timestamp"])
-    print("Total Relays: %d" % m["total_relays"])
     print()
-    print("STATUS BREAKDOWN:")
-    print("  Success:       %5d  (%.2f%%)" % (m["success"], m["success_rate_percent"]))
+    
+    # Relay counts
+    consensus = m.get("consensus_relays", m.get("total_relays", 0))
+    tested = m.get("tested_relays", m.get("total_relays", 0))
+    unreachable = m.get("relay_unreachable", 0)
+    print("RELAY COUNTS:")
+    print("  Consensus Relays:    %5d" % consensus)
+    print("  Tested (reachable):  %5d  (%.2f%%)" % (tested, m.get("reachability_success_rate_percent", 0)))
+    print("  Relay Unreachable:   %5d" % unreachable)
+    print()
+    
+    print("DNS TEST RESULTS (of %d tested relays):" % tested)
+    print("  Success:       %5d  (%.2f%%)" % (m["success"], m.get("dns_success_rate_percent", m.get("success_rate_percent", 0))))
     print("  DNS Fail:      %5d" % m["dns_fail"])
     print("  Wrong IP:      %5d" % m["wrong_ip"])
     print("  Timeout:       %5d" % m["timeout"])
@@ -364,6 +485,14 @@ def print_summary(report):
     print("  Network Error: %5d" % m["network_error"])
     print("  Other Error:   %5d" % m["error"])
     print("  Exception:     %5d" % m["exception"])
+    
+    # Circuit failure reasons breakdown
+    cfr = m.get("circuit_failure_reasons")
+    if cfr:
+        print()
+        print("CIRCUIT FAILURE REASONS (%d total):" % unreachable)
+        for reason, count in sorted(cfr.items(), key=lambda x: -x[1]):
+            print("  %-25s %5d" % (reason + ":", count))
     print()
     
     # Cross-validation details
@@ -425,6 +554,8 @@ def main():
     args = parser.parse_args()
 
     cv_stats = None
+    circuit_failures = []
+    scan_stats = {"total_circuits": 0, "successful_circuits": 0, "failed_circuits": 0}
     
     if args.cross_validate and args.sources:
         # Cross-validation mode: merge best results from multiple sources
@@ -433,6 +564,18 @@ def main():
             print("No results found in source directories")
             return 1
         print("Cross-validated %d unique relays from %d sources" % (len(results), len(args.sources)))
+        # Load scan stats and circuit failures from all source directories
+        for source_dir in args.sources:
+            source_scan_stats = load_scan_stats(source_dir, recursive=True)
+            # For cross-validation, take max of total_circuits (should be same across instances)
+            if source_scan_stats["total_circuits"] > scan_stats["total_circuits"]:
+                scan_stats["total_circuits"] = source_scan_stats["total_circuits"]
+            # Sum the successful and failed counts (will be divided later for average if needed)
+            scan_stats["successful_circuits"] = max(scan_stats["successful_circuits"], 
+                                                     source_scan_stats["successful_circuits"])
+            scan_stats["failed_circuits"] = min(scan_stats["failed_circuits"] or source_scan_stats["failed_circuits"],
+                                                 source_scan_stats["failed_circuits"]) if scan_stats["failed_circuits"] else source_scan_stats["failed_circuits"]
+            circuit_failures.extend(load_circuit_failures(source_dir, recursive=True))
     else:
         # Standard mode: load from single input directory
         results = load_results(args.input)
@@ -440,8 +583,23 @@ def main():
             print("No results found in %s" % args.input)
             return 1
         print("Loaded %d results" % len(results))
+        # Load scan stats and circuit failures from input directory
+        scan_stats = load_scan_stats(args.input)
+        circuit_failures = load_circuit_failures(args.input)
+    
+    # Deduplicate circuit failures by fingerprint
+    if circuit_failures:
+        seen_fps = set()
+        unique_failures = []
+        for cf in circuit_failures:
+            fp = cf.get("exit_fingerprint")
+            if fp and fp not in seen_fps:
+                unique_failures.append(cf)
+                seen_fps.add(fp)
+        circuit_failures = unique_failures
+        print("Total circuit failures with fingerprints: %d" % len(circuit_failures))
 
-    report = aggregate_results(results, args.previous)
+    report = aggregate_results(results, args.previous, circuit_failures, scan_stats)
     
     # Add cross-validation metadata if applicable
     if cv_stats:
