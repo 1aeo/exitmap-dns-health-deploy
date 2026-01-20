@@ -25,7 +25,7 @@ STATUS_PRIORITY = {
     "socks_error": 3,  # May be transient
     "network_error": 4,
     "error": 5,
-    "timeout": 6,      # Often transient
+    "timeout": 6,      # Often transient (includes terminated-during-retry)
     "exception": 7,
     "unknown": 8,
     "relay_unreachable": 9,  # Circuit failure - not DNS test result
@@ -388,20 +388,25 @@ def aggregate_results(results, previous_report=None, circuit_failures=None, scan
                 "error": r.get("error")
             })
 
-    # Calculate totals and rates
-    # Use scan_stats if available (source of truth for circuit counts)
+    # Calculate totals and rates from actual results (source of truth)
+    # scan_stats may over-count if some result files weren't written
+    total = len(results)
+    relay_unreachable = stats.get("relay_unreachable", 0)
+    tested_relays = total - relay_unreachable
+    
+    # Use scan_stats for consensus count only (total attempted)
     if scan_stats and scan_stats.get("total_circuits", 0) > 0:
         consensus_relays = scan_stats["total_circuits"]
-        relay_unreachable = scan_stats["failed_circuits"]
-        tested_relays = scan_stats["successful_circuits"]
-        print("Using scan_stats: %d consensus, %d tested, %d unreachable" % (
-            consensus_relays, tested_relays, relay_unreachable))
+        # Log if there's a discrepancy
+        expected_total = scan_stats["successful_circuits"] + scan_stats["failed_circuits"]
+        if total != expected_total:
+            print("Warning: scan_stats expected %d results, but only %d files found (missing %d)" % (
+                expected_total, total, expected_total - total))
     else:
-        # Fallback to counting from results
-        total = len(results)
-        relay_unreachable = stats.get("relay_unreachable", 0)
-        tested_relays = total - relay_unreachable
         consensus_relays = total
+    
+    print("Counts: %d consensus, %d tested, %d unreachable (from %d result files)" % (
+        consensus_relays, tested_relays, relay_unreachable, total))
     
     success = stats.get("success", 0)
     

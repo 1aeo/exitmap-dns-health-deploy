@@ -106,6 +106,8 @@ fi
 [[ -n "${DNS_MAX_RETRIES:-}" ]] && export DNS_MAX_RETRIES
 [[ -n "${DNS_HARD_TIMEOUT:-}" ]] && export DNS_HARD_TIMEOUT
 [[ -n "${DNS_RETRY_DELAY:-}" ]] && export DNS_RETRY_DELAY
+# Grace period for straggling probes before termination
+export EXITMAP_GRACE_TIMEOUT="${EXITMAP_GRACE_TIMEOUT:-10}"
 FIRST_HOP="${FIRST_HOP:-}"
 # Export first hop for tracking in dnshealth module results
 [[ -n "${FIRST_HOP}" ]] && export EXITMAP_FIRST_HOP="$FIRST_HOP"

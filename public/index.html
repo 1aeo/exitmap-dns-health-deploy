@@ -195,7 +195,7 @@
         /* Unified Results Section */
         .metrics-grid {
             display: grid;
-            grid-template-columns: repeat(4, 1fr);
+            grid-template-columns: repeat(5, 1fr);
             gap: 1rem;
             margin-bottom: 1.5rem;
         }
@@ -395,9 +395,6 @@
             font-family: monospace;
             font-size: 0.75rem;
             color: var(--aeo-text-dim);
-            max-width: 280px;
-            overflow: hidden;
-            text-overflow: ellipsis;
             white-space: nowrap;
         }
 
@@ -593,6 +590,9 @@
             .metrics-grid {
                 grid-template-columns: repeat(2, 1fr);
             }
+            .metrics-grid .metric-item:nth-child(5) {
+                grid-column: 1 / -1;
+            }
             .metric-value { font-size: 1.5rem; }
             .details-row { flex-direction: column; gap: 0.75rem; }
             .api-item { flex-direction: column; align-items: flex-start; gap: 0.5rem; }
@@ -764,8 +764,12 @@
                 const success = meta.success || 0;
                 const dnsSuccessRate = meta.dns_success_rate_percent || meta.success_rate_percent || 0;
                 const reachabilityRate = meta.reachability_success_rate_percent || 100;
-                const dnsFailed = testedRelays - success;
                 const cv = meta.cross_validation || {};
+                
+                // Calculate DNS errors (actual categorized failures, not including unreachable)
+                const dnsErrorCount = (meta.timeout || 0) + (meta.dns_fail || 0) + (meta.wrong_ip || 0) + 
+                                      (meta.socks_error || 0) + (meta.network_error || 0) + 
+                                      (meta.exception || 0) + (meta.error || 0);
                 
                 // Update timestamp in header
                 if (meta.timestamp) {
@@ -778,32 +782,44 @@
                     <div class="metrics-grid">
                         <div class="metric-item">
                             <div class="metric-value info">${consensusRelays.toLocaleString()}</div>
-                            <div class="metric-label">Consensus Relays</div>
+                            <div class="metric-label">Consensus Exit Relays</div>
                         </div>
                         <div class="metric-item">
                             <div class="metric-value ${reachabilityRate >= 90 ? 'success' : reachabilityRate >= 75 ? 'warning' : 'error'}">${testedRelays.toLocaleString()}</div>
-                            <div class="metric-label">Tested (${reachabilityRate.toFixed(1)}%)</div>
+                            <div class="metric-label">DNS Tested (${reachabilityRate.toFixed(1)}%)</div>
                         </div>
                         <div class="metric-item">
-                            <div class="metric-value success">${success.toLocaleString()}</div>
-                            <div class="metric-label">DNS Success</div>
+                            <div class="metric-value ${dnsSuccessRate >= 95 ? 'success' : dnsSuccessRate >= 80 ? 'warning' : 'error'}">${success.toLocaleString()}</div>
+                            <div class="metric-label">DNS Success (${dnsSuccessRate.toFixed(1)}%)</div>
                         </div>
                         <div class="metric-item">
-                            <div class="metric-value ${dnsSuccessRate >= 95 ? 'success' : dnsSuccessRate >= 80 ? 'warning' : 'error'}">${dnsSuccessRate.toFixed(1)}%</div>
-                            <div class="metric-label">DNS Success Rate</div>
+                            <div class="metric-value error">${dnsErrorCount.toLocaleString()}</div>
+                            <div class="metric-label">DNS Errors</div>
+                        </div>
+                        <div class="metric-item">
+                            <div class="metric-value error">${relayUnreachable.toLocaleString()}</div>
+                            <div class="metric-label">Unreachable Relays</div>
                         </div>
                     </div>
                 `;
                 
                 // Row 1: Configuration
                 const configItems = [];
-                configItems.push(`<span class="detail-label">DNS Validation Mode:</span> <span class="detail-value">${meta.mode || 'wildcard'}</span>`);
                 
+                // Determine validation mode (Single Instance, Cross Validation, Split)
+                let validationMode = 'Single Instance';
                 if (cv.enabled) {
-                    configItems.push(`<span class="detail-label">Cross-Validation:</span> <span class="detail-value">${cv.instances} instances</span>`);
-                    if (cv.relays_improved) {
-                        configItems.push(`<span class="detail-label">Cross-Validation Relays Recovered:</span> <span class="detail-value">${cv.relays_improved.toLocaleString()}</span>`);
-                    }
+                    validationMode = `Cross Validation (${cv.instances} instances)`;
+                } else if (meta.split_mode) {
+                    validationMode = `Split (${meta.split_instances || 2} instances)`;
+                }
+                configItems.push(`<span class="detail-label">DNS Validation Mode:</span> <span class="detail-value">${validationMode}</span>`);
+                
+                // DNS Validation Type (wildcard, etc.)
+                configItems.push(`<span class="detail-label">DNS Validation Type:</span> <span class="detail-value">${meta.mode || 'Wildcard'}</span>`);
+                
+                if (cv.enabled && cv.relays_improved) {
+                    configItems.push(`<span class="detail-label">Relays Recovered:</span> <span class="detail-value">${cv.relays_improved.toLocaleString()}</span>`);
                 }
                 
                 html += `
@@ -815,7 +831,7 @@
                     </div>
                 `;
                 
-                // Row 2: Results breakdown
+                // Row 2: Results breakdown - hierarchical DNS and Circuit errors
                 const statusColors = {
                     success: 'var(--status-success)',
                     timeout: 'var(--status-warning)',
@@ -825,34 +841,84 @@
                     socks_error: 'var(--aeo-text-muted)',
                     network_error: 'var(--aeo-text-muted)',
                     error: 'var(--aeo-text-muted)',
-                    relay_unreachable: 'var(--status-warning)'
+                    relay_unreachable: 'var(--status-warning)',
+                    circuit_timeout: 'var(--status-warning)',
+                    circuit_destroyed: 'var(--status-error)',
+                    channel_closed: 'var(--status-warning)'
                 };
                 
-                const statusCounts = {
-                    success: meta.success || 0,
-                    relay_unreachable: meta.relay_unreachable || 0,
+                // DNS Errors (from metadata counts)
+                const dnsErrors = {
                     timeout: meta.timeout || 0,
                     dns_fail: meta.dns_fail || 0,
-                    exception: meta.exception || 0,
                     wrong_ip: meta.wrong_ip || 0,
                     socks_error: meta.socks_error || 0,
                     network_error: meta.network_error || 0,
+                    exception: meta.exception || 0,
                     error: meta.error || 0
                 };
-                
-                const nonZeroStatuses = Object.entries(statusCounts)
+                const dnsErrorTotal = Object.values(dnsErrors).reduce((a, b) => a + b, 0);
+                const topDnsErrors = Object.entries(dnsErrors)
                     .filter(([_, count]) => count > 0)
-                    .sort((a, b) => b[1] - a[1]);
+                    .sort((a, b) => b[1] - a[1])
+                    .slice(0, 3);
                 
-                if (nonZeroStatuses.length > 0) {
+                // Circuit Errors (from circuit_failure_reasons)
+                const circuitReasons = meta.circuit_failure_reasons || {};
+                const circuitErrorTotal = Object.values(circuitReasons).reduce((a, b) => a + b, 0);
+                const topCircuitErrors = Object.entries(circuitReasons)
+                    .filter(([_, count]) => count > 0)
+                    .sort((a, b) => b[1] - a[1])
+                    .slice(0, 3);
+                
+                // Build hierarchical results display
+                if (dnsErrorTotal > 0 || circuitErrorTotal > 0) {
                     html += `
-                        <div class="details-row">
+                        <div class="details-row" style="flex-direction: column; gap: 0.75rem;">
                             <div class="detail-item">
                                 <span class="detail-label" style="color: var(--aeo-green);">📊 Results:</span>
                             </div>
-                            ${nonZeroStatuses.map(([status, count]) => 
-                                `<div class="detail-item"><span class="detail-label">${status}:</span> <span class="detail-value" style="color: ${statusColors[status]}">${count.toLocaleString()}</span></div>`
-                            ).join('')}
+                            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+                    `;
+                    
+                    // DNS Errors section
+                    if (dnsErrorTotal > 0) {
+                        html += `
+                            <div style="background: var(--aeo-dark-tertiary); padding: 0.75rem 1rem; border-radius: 8px;">
+                                <div style="font-weight: 600; color: var(--status-error); margin-bottom: 0.4rem; font-size: 0.9rem;">
+                                    🔴 DNS Errors (${dnsErrorTotal.toLocaleString()})
+                                </div>
+                                <div style="display: flex; flex-direction: column; gap: 0.15rem; font-size: 0.8rem;">
+                                    ${topDnsErrors.map(([status, count]) => 
+                                        `<div style="display: flex; justify-content: space-between; gap: 1rem;"><span style="color: var(--aeo-text-muted);">${status}</span><span style="color: ${statusColors[status]}; font-family: monospace;">${count.toLocaleString()}</span></div>`
+                                    ).join('')}
+                                </div>
+                            </div>
+                        `;
+                    } else {
+                        html += `<div></div>`; // Empty placeholder for grid
+                    }
+                    
+                    // Circuit Errors section
+                    if (circuitErrorTotal > 0) {
+                        html += `
+                            <div style="background: var(--aeo-dark-tertiary); padding: 0.75rem 1rem; border-radius: 8px;">
+                                <div style="font-weight: 600; color: var(--status-warning); margin-bottom: 0.4rem; font-size: 0.9rem;">
+                                    🟠 Circuit Errors (${circuitErrorTotal.toLocaleString()})
+                                </div>
+                                <div style="display: flex; flex-direction: column; gap: 0.15rem; font-size: 0.8rem;">
+                                    ${topCircuitErrors.map(([status, count]) => 
+                                        `<div style="display: flex; justify-content: space-between; gap: 1rem;"><span style="color: var(--aeo-text-muted);">${status}</span><span style="color: ${statusColors[status]}; font-family: monospace;">${count.toLocaleString()}</span></div>`
+                                    ).join('')}
+                                </div>
+                            </div>
+                        `;
+                    } else {
+                        html += `<div></div>`; // Empty placeholder for grid
+                    }
+                    
+                    html += `
+                            </div>
                         </div>
                     `;
                 }
@@ -916,9 +982,9 @@
                     html += displayFailures.map(f => `
                         <tr>
                             <td><strong>${escapeHtml(f.exit_nickname || 'Unknown')}</strong></td>
-                            <td class="fingerprint" title="${f.exit_fingerprint || ''}">${f.exit_fingerprint || ''}</td>
+                            <td class="fingerprint">${f.exit_fingerprint || ''}</td>
                             <td><span class="status-badge ${f.status || 'error'}">${f.status || 'error'}</span></td>
-                            <td style="color: var(--aeo-text-muted); font-size: 0.8rem;" title="${escapeHtml(f.error || '')}">${escapeHtml((f.error || '').slice(0, 80))}${(f.error || '').length > 80 ? '...' : ''}</td>
+                            <td style="color: var(--aeo-text-muted); font-size: 0.8rem;" title="${escapeHtml(f.error || '')}">${escapeHtml((f.error || '').slice(0, 120))}${(f.error || '').length > 120 ? '...' : ''}</td>
                         </tr>
                     `).join('');
                     
