@@ -17,18 +17,65 @@ from datetime import datetime, timezone
 from collections import Counter
 
 
-# Priority for cross-validation: success beats everything
-STATUS_PRIORITY = {
-    "success": 0,      # Best - always keep
-    "wrong_ip": 1,     # Keep - definitive failure
-    "dns_fail": 2,     # Keep - definitive failure
-    "socks_error": 3,  # May be transient
-    "network_error": 4,
-    "error": 5,
-    "timeout": 6,      # Often transient (includes terminated-during-retry)
-    "exception": 7,
-    "unknown": 8,
-    "relay_unreachable": 9,  # Circuit failure - not DNS test result
+# Cross-validation: when multiple instances test the same relay,
+# pick the result with the lowest priority number as the "best" result.
+# This doesn't drop other results - it just selects which one to use as primary.
+CROSS_VALIDATION_RESULT_PRIORITY = {
+    "success": 0,           # Best - always prefer success
+    "wrong_ip": 1,          # Definitive DNS failure
+    "dns_fail": 2,          # Definitive DNS failure
+    "socks_error": 3,       # May be transient
+    "network_error": 4,     # May be transient
+    "error": 5,             # Generic error
+    "timeout": 6,           # Often transient
+    "hard_timeout": 6,      # Same priority as timeout
+    "exception": 7,         # Code error
+    "unknown": 8,           # Unknown status
+    "relay_unreachable": 9, # Circuit failure - not a DNS test result
+}
+
+
+# All 17 circuit failure types for explicit zeros in output
+CIRCUIT_FAILURE_TYPES = [
+    "circuit_timeout",
+    "circuit_destroyed",
+    "circuit_channel_closed",
+    "circuit_connect_failed",
+    "circuit_no_path",
+    "circuit_resource_limit",
+    "circuit_hibernating",
+    "circuit_finished",
+    "circuit_connection_closed",
+    "circuit_io_error",
+    "circuit_protocol_error",
+    "circuit_internal_error",
+    "circuit_requested",
+    "circuit_no_service",
+    "circuit_measurement_expired",
+    "circuit_guard_limit",
+    "circuit_failed",
+]
+
+
+# Mapping from raw circuit_reason values to normalized JSON keys
+CIRCUIT_REASON_MAP = {
+    "circuit_timeout": "circuit_timeout",
+    "circuit_destroyed": "circuit_destroyed",
+    "channel_closed": "circuit_channel_closed",
+    "relay_connect_failed": "circuit_connect_failed",
+    "circuit_no_path": "circuit_no_path",
+    "relay_resource_limit": "circuit_resource_limit",
+    "relay_hibernating": "circuit_hibernating",
+    "circuit_finished": "circuit_finished",
+    "relay_connection_closed": "circuit_connection_closed",
+    "io_error": "circuit_io_error",
+    "tor_protocol_error": "circuit_protocol_error",
+    "tor_internal_error": "circuit_internal_error",
+    "circuit_requested": "circuit_requested",
+    "no_such_service": "circuit_no_service",
+    "measurement_expired": "circuit_measurement_expired",
+    "guard_limit": "circuit_guard_limit",
+    "circuit_failed": "circuit_failed",
 }
 
 
@@ -217,10 +264,10 @@ def cross_validate_results(source_dirs):
             cv_stats["per_instance_stats"][inst_name][status] += 1
             per_instance[inst_name] = _extract_instance_detail(result)
         
-        # Find best result (sort by status priority)
+        # Find best result (sort by cross-validation result priority)
         sorted_results = sorted(
             instance_results.items(),
-            key=lambda x: STATUS_PRIORITY.get(x[1].get("status", "unknown"), 99)
+            key=lambda x: CROSS_VALIDATION_RESULT_PRIORITY.get(x[1].get("status", "unknown"), 99)
         )
         best_inst, best_result = sorted_results[0]
         
@@ -327,7 +374,65 @@ def compute_latency_stats(timings):
     }
 
 
-def aggregate_results(results, previous_report=None, circuit_failures=None, scan_stats=None):
+def _normalize_circuit_reason(reason):
+    """Normalize circuit_reason to standard circuit_* key."""
+    return CIRCUIT_REASON_MAP.get(reason, "circuit_failed")
+
+
+def _order_result_fields(result):
+    """Return result dict with fields in standard order, removing per-run constants."""
+    # Standard field order per plan
+    ordered = {}
+    
+    # 1-3: Identity fields
+    if "exit_fingerprint" in result:
+        ordered["exit_fingerprint"] = result["exit_fingerprint"]
+    if "exit_nickname" in result:
+        ordered["exit_nickname"] = result["exit_nickname"]
+    if "exit_address" in result:
+        ordered["exit_address"] = result["exit_address"]
+    
+    # 4: Status
+    if "status" in result:
+        ordered["status"] = result["status"]
+    
+    # 5-6: IP resolution
+    if "resolved_ip" in result:
+        ordered["resolved_ip"] = result["resolved_ip"]
+    if "expected_ip" in result:
+        ordered["expected_ip"] = result["expected_ip"]
+    
+    # 7-8: Query details
+    if "query_domain" in result:
+        ordered["query_domain"] = result["query_domain"]
+    if "first_hop" in result:
+        ordered["first_hop"] = result["first_hop"]
+    
+    # 9-12: Timing and metadata
+    if "timing" in result:
+        ordered["timing"] = result["timing"]
+    if "timestamp" in result:
+        ordered["timestamp"] = result["timestamp"]
+    if "attempt" in result:
+        ordered["attempt"] = result["attempt"]
+    if "consecutive_failures" in result:
+        ordered["consecutive_failures"] = result["consecutive_failures"]
+    
+    # 13: Error
+    if "error" in result:
+        ordered["error"] = result["error"]
+    
+    # 14: Cross-validation details (if present)
+    if "cv" in result:
+        ordered["cv"] = result["cv"]
+    
+    # Note: tor_metrics_url, mode, run_id are NOT included (moved to metadata or derivable)
+    
+    return ordered
+
+
+def aggregate_results(results, previous_report=None, circuit_failures=None, scan_stats=None,
+                      scan_type="single", scan_instances=1, instance_names=None):
     """Aggregate results into a summary report (single pass)."""
     # Load previous state for consecutive failure tracking
     prev_state = {}
@@ -344,7 +449,7 @@ def aggregate_results(results, previous_report=None, circuit_failures=None, scan
     # Merge circuit failures into results (if any)
     # Track which fingerprints we've already seen from DNS results
     dns_fingerprints = {r.get("exit_fingerprint") for r in results}
-    circuit_failure_reasons = Counter()
+    circuit_counts = Counter()  # Normalized circuit_* keys
     
     if circuit_failures:
         for cf in circuit_failures:
@@ -353,15 +458,23 @@ def aggregate_results(results, previous_report=None, circuit_failures=None, scan
             if fp and fp not in dns_fingerprints:
                 results.append(cf)
                 dns_fingerprints.add(fp)
-            # Track circuit failure reasons
-            reason = cf.get("circuit_reason", "circuit_failed")
-            circuit_failure_reasons[reason] += 1
+            # Track circuit failure reasons (normalize to circuit_* keys)
+            raw_reason = cf.get("circuit_reason", "circuit_failed")
+            normalized_key = _normalize_circuit_reason(raw_reason)
+            circuit_counts[normalized_key] += 1
+
+    # Extract run_id and mode from first result (same for all)
+    run_id = None
+    mode = "wildcard"
+    if results:
+        first_result = results[0]
+        run_id = first_result.get("run_id")
+        mode = first_result.get("mode", "wildcard")
 
     # Single-pass aggregation
     stats = Counter()
     timings = []
-    failures = []
-    failures_by_ip = {}
+    processed_results = []
 
     for r in results:
         status = r.get("status", "unknown")
@@ -378,21 +491,13 @@ def aggregate_results(results, previous_report=None, circuit_failures=None, scan
             prev_failures = prev.get("consecutive_failures", 0) if prev.get("status") != "success" else 0
             r["consecutive_failures"] = prev_failures + 1
 
-            # Build failure entry (only for non-success)
-            failures.append(r)
-            ip = r.get("exit_address", "unknown")
-            failures_by_ip.setdefault(ip, []).append({
-                "fingerprint": fp,
-                "nickname": r.get("exit_nickname", "unknown"),
-                "status": status,
-                "error": r.get("error")
-            })
+        # Order fields and remove per-run constants
+        processed_results.append(_order_result_fields(r))
 
     # Calculate totals and rates from actual results (source of truth)
-    # scan_stats may over-count if some result files weren't written
     total = len(results)
-    relay_unreachable = stats.get("relay_unreachable", 0)
-    tested_relays = total - relay_unreachable
+    unreachable_relays = stats.get("relay_unreachable", 0)
+    tested_relays = total - unreachable_relays
     
     # Use scan_stats for consensus count only (total attempted)
     if scan_stats and scan_stats.get("total_circuits", 0) > 0:
@@ -406,48 +511,58 @@ def aggregate_results(results, previous_report=None, circuit_failures=None, scan
         consensus_relays = total
     
     print("Counts: %d consensus, %d tested, %d unreachable (from %d result files)" % (
-        consensus_relays, tested_relays, relay_unreachable, total))
+        consensus_relays, tested_relays, unreachable_relays, total))
     
-    success = stats.get("success", 0)
+    dns_success = stats.get("success", 0)
     
-    # Two success rates per plan
-    dns_success_rate = (success / tested_relays * 100) if tested_relays else 0
-    reachability_success_rate = (tested_relays / consensus_relays * 100) if consensus_relays else 0
+    # Two success rates
+    dns_success_rate = (dns_success / tested_relays * 100) if tested_relays else 0
+    reachability_rate = (tested_relays / consensus_relays * 100) if consensus_relays else 0
     
     timing_stats = compute_latency_stats(timings)
 
-    return {
-        "metadata": {
-            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-            # New relay count fields
-            "consensus_relays": consensus_relays,
-            "tested_relays": tested_relays,
-            "relay_unreachable": relay_unreachable,
-            # Keep total_relays for backwards compatibility
-            "total_relays": tested_relays,
-            # Status counts
-            "success": success,
-            "wrong_ip": stats.get("wrong_ip", 0),
-            "dns_fail": stats.get("dns_fail", 0),
-            "timeout": stats.get("timeout", 0),
-            "error": stats.get("error", 0),
-            "socks_error": stats.get("socks_error", 0),
-            "network_error": stats.get("network_error", 0),
-            "exception": stats.get("exception", 0),
-            "unknown": stats.get("unknown", 0),
-            # Two success rates
-            "dns_success_rate_percent": round(dns_success_rate, 2),
-            "reachability_success_rate_percent": round(reachability_success_rate, 2),
-            # Keep old name for backwards compatibility
-            "success_rate_percent": round(dns_success_rate, 2),
-            # Timing stats
-            "timing": timing_stats,
-            # Circuit failure breakdown (if any)
-            "circuit_failure_reasons": dict(circuit_failure_reasons) if circuit_failure_reasons else None,
+    # Build metadata with new schema
+    metadata = {
+        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "run_id": run_id,
+        "mode": mode,
+        
+        # Scan configuration
+        "scan": {
+            "type": scan_type,
+            "instances": scan_instances,
+            "instance_names": instance_names or [],
         },
-        "results": results,
-        "failures": failures,
-        "failures_by_ip": failures_by_ip,
+        
+        # Relay counts
+        "consensus_relays": consensus_relays,
+        "tested_relays": tested_relays,
+        "unreachable_relays": unreachable_relays,
+        
+        # DNS test results (all 9 with dns_ prefix)
+        "dns_success": dns_success,
+        "dns_fail": stats.get("dns_fail", 0),
+        "dns_timeout": stats.get("timeout", 0),
+        "dns_wrong_ip": stats.get("wrong_ip", 0),
+        "dns_socks_error": stats.get("socks_error", 0),
+        "dns_network_error": stats.get("network_error", 0),
+        "dns_error": stats.get("error", 0),
+        "dns_exception": stats.get("exception", 0),
+        "dns_unknown": stats.get("unknown", 0),
+    }
+    
+    # Add all 17 circuit failure types with explicit zeros
+    for circuit_type in CIRCUIT_FAILURE_TYPES:
+        metadata[circuit_type] = circuit_counts.get(circuit_type, 0)
+    
+    # Add rates and timing
+    metadata["dns_success_rate_percent"] = round(dns_success_rate, 2)
+    metadata["reachability_rate_percent"] = round(reachability_rate, 2)
+    metadata["timing"] = timing_stats
+
+    return {
+        "metadata": metadata,
+        "results": processed_results,
     }
 
 
@@ -469,42 +584,50 @@ def print_summary(report):
     print("DNS HEALTH VALIDATION SUMMARY")
     print("=" * 60)
     print("Timestamp: %s" % m["timestamp"])
+    
+    # Scan info
+    scan = m.get("scan", {})
+    if scan:
+        print("Scan: %s mode, %d instance(s)" % (scan.get("type", "single"), scan.get("instances", 1)))
     print()
     
     # Relay counts
-    consensus = m.get("consensus_relays", m.get("total_relays", 0))
-    tested = m.get("tested_relays", m.get("total_relays", 0))
-    unreachable = m.get("relay_unreachable", 0)
+    consensus = m.get("consensus_relays", 0)
+    tested = m.get("tested_relays", 0)
+    unreachable = m.get("unreachable_relays", 0)
     print("RELAY COUNTS:")
     print("  Consensus Relays:    %5d" % consensus)
-    print("  Tested (reachable):  %5d  (%.2f%%)" % (tested, m.get("reachability_success_rate_percent", 0)))
-    print("  Relay Unreachable:   %5d" % unreachable)
+    print("  Tested (reachable):  %5d  (%.2f%%)" % (tested, m.get("reachability_rate_percent", 0)))
+    print("  Unreachable Relays:  %5d" % unreachable)
     print()
     
     print("DNS TEST RESULTS (of %d tested relays):" % tested)
-    print("  Success:       %5d  (%.2f%%)" % (m["success"], m.get("dns_success_rate_percent", m.get("success_rate_percent", 0))))
-    print("  DNS Fail:      %5d" % m["dns_fail"])
-    print("  Wrong IP:      %5d" % m["wrong_ip"])
-    print("  Timeout:       %5d" % m["timeout"])
-    print("  SOCKS Error:   %5d" % m["socks_error"])
-    print("  Network Error: %5d" % m["network_error"])
-    print("  Other Error:   %5d" % m["error"])
-    print("  Exception:     %5d" % m["exception"])
+    print("  Success:       %5d  (%.2f%%)" % (m.get("dns_success", 0), m.get("dns_success_rate_percent", 0)))
+    print("  DNS Fail:      %5d" % m.get("dns_fail", 0))
+    print("  Wrong IP:      %5d" % m.get("dns_wrong_ip", 0))
+    print("  Timeout:       %5d" % m.get("dns_timeout", 0))
+    print("  SOCKS Error:   %5d" % m.get("dns_socks_error", 0))
+    print("  Network Error: %5d" % m.get("dns_network_error", 0))
+    print("  Other Error:   %5d" % m.get("dns_error", 0))
+    print("  Exception:     %5d" % m.get("dns_exception", 0))
     
-    # Circuit failure reasons breakdown
-    cfr = m.get("circuit_failure_reasons")
-    if cfr:
+    # Circuit failure breakdown (from flat circuit_* fields)
+    if unreachable > 0:
         print()
-        print("CIRCUIT FAILURE REASONS (%d total):" % unreachable)
-        for reason, count in sorted(cfr.items(), key=lambda x: -x[1]):
-            print("  %-25s %5d" % (reason + ":", count))
+        print("CIRCUIT FAILURES (%d total):" % unreachable)
+        for circuit_type in CIRCUIT_FAILURE_TYPES:
+            count = m.get(circuit_type, 0)
+            if count > 0:
+                print("  %-30s %5d" % (circuit_type + ":", count))
     print()
     
     # Cross-validation details
     cv = m.get("cross_validation", {})
-    if cv.get("enabled"):
-        print("CROSS-VALIDATION (%d instances):" % cv.get("instances", 0))
-        print("  Instances: %s" % ", ".join(cv.get("instance_names", [])))
+    scan_type = m.get("scan", {}).get("type", "single")
+    if scan_type == "cross_validate" and cv:
+        scan_info = m.get("scan", {})
+        print("CROSS-VALIDATION (%d instances):" % scan_info.get("instances", 0))
+        print("  Instances: %s" % ", ".join(scan_info.get("instance_names", [])))
         cons = cv.get("consistency", {})
         print("  Consistency: %d all-success, %d all-failed, %d mixed" % (
             cons.get("all_success", 0), cons.get("all_failed", 0), cons.get("mixed", 0)))
@@ -529,13 +652,15 @@ def print_summary(report):
     print(_fmt_timing_line("Total (circuit + DNS)", timing.get("total")))
     print()
 
-    failures = report["failures"]
+    # Compute failures from results (no longer stored separately)
+    results = report.get("results", [])
+    failures = [r for r in results if r.get("status") != "success"]
     if failures:
         print("FAILED RELAYS (%d):" % len(failures))
         for f in failures[:20]:
             print("  - %-20s (%s...) [%s] %s" % (
                 f.get("exit_nickname", "unknown")[:20],
-                f["exit_fingerprint"][:8],
+                f.get("exit_fingerprint", "????????")[:8],
                 f.get("status"),
                 (f.get("error") or "")[:40]
             ))
@@ -556,6 +681,11 @@ def main():
                         help="Enable cross-validation mode (best result wins)")
     parser.add_argument("--source", "-s", action="append", dest="sources",
                         help="Source directory for cross-validation (can repeat)")
+    parser.add_argument("--scan-type", default="single",
+                        choices=["single", "cross_validate", "split"],
+                        help="Scan mode type for metadata")
+    parser.add_argument("--scan-instances", type=int, default=1,
+                        help="Number of instances used in scan")
     args = parser.parse_args()
 
     cv_stats = None
@@ -604,14 +734,24 @@ def main():
         circuit_failures = unique_failures
         print("Total circuit failures with fingerprints: %d" % len(circuit_failures))
 
-    report = aggregate_results(results, args.previous, circuit_failures, scan_stats)
+    # Determine instance names for scan metadata
+    instance_names = []
+    if cv_stats:
+        instance_names = cv_stats.get("instance_names", [])
+    elif args.scan_instances > 1:
+        # Generate default names for split mode
+        instance_names = [f"split{i}" for i in range(1, args.scan_instances + 1)]
+    
+    report = aggregate_results(
+        results, args.previous, circuit_failures, scan_stats,
+        scan_type=args.scan_type,
+        scan_instances=args.scan_instances,
+        instance_names=instance_names
+    )
     
     # Add cross-validation metadata if applicable
     if cv_stats:
         report["metadata"]["cross_validation"] = {
-            "enabled": True,
-            "instances": cv_stats["instances"],
-            "instance_names": cv_stats.get("instance_names", []),
             "relays_improved": cv_stats["improved"],
             "recovered_from_timeout": cv_stats.get("recovered_from_timeout", 0),
             "recovered_from_dns_fail": cv_stats.get("recovered_from_dns_fail", 0),

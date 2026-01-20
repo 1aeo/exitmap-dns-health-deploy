@@ -177,26 +177,31 @@ import json, sys
 try:
     with open('$report_file') as f:
         m = json.load(f)['metadata']
-        # Relay counts
-        consensus = m.get('consensus_relays', m.get('total_relays', 0))
-        tested = m.get('tested_relays', m.get('total_relays', 0))
-        unreachable = m.get('relay_unreachable', 0)
+        scan = m.get('scan', {})
+        # Relay counts (new field names)
+        consensus = m.get('consensus_relays', 0)
+        tested = m.get('tested_relays', 0)
+        unreachable = m.get('unreachable_relays', 0)
         print(f\"Consensus relays: {consensus}\")
-        print(f\"Tested (reachable): {tested} ({m.get('reachability_success_rate_percent', 100):.2f}%)\")
+        print(f\"Tested (reachable): {tested} ({m.get('reachability_rate_percent', 100):.2f}%)\")
         if unreachable > 0:
-            print(f\"Relay Unreachable: {unreachable}\")
-        # DNS results
-        dns_rate = m.get('dns_success_rate_percent', m.get('success_rate_percent', 0))
-        print(f\"Success: {m['success']} ({dns_rate}%)\")
-        print(f\"DNS Fail: {m['dns_fail']}\")
-        print(f\"Timeout: {m['timeout']}\")
-        print(f\"Wrong IP: {m['wrong_ip']}\")
-        print(f\"SOCKS Error: {m.get('socks_error', 0)}\")
-        print(f\"Network Error: {m.get('network_error', 0)}\")
-        cv = m.get('cross_validation', {})
-        if cv.get('enabled'):
-            print(f\"Cross-validation instances: {cv.get('instances', 'N/A')}\")
+            print(f\"Unreachable Relays: {unreachable}\")
+        # DNS results (new dns_ prefixed field names)
+        dns_rate = m.get('dns_success_rate_percent', 0)
+        print(f\"DNS Success: {m.get('dns_success', 0)} ({dns_rate}%)\")
+        print(f\"DNS Fail: {m.get('dns_fail', 0)}\")
+        print(f\"DNS Timeout: {m.get('dns_timeout', 0)}\")
+        print(f\"DNS Wrong IP: {m.get('dns_wrong_ip', 0)}\")
+        print(f\"DNS SOCKS Error: {m.get('dns_socks_error', 0)}\")
+        print(f\"DNS Network Error: {m.get('dns_network_error', 0)}\")
+        # Scan mode info
+        scan_type = scan.get('type', 'single')
+        if scan_type == 'cross_validate':
+            cv = m.get('cross_validation', {})
+            print(f\"Scan Mode: Cross-validation ({scan.get('instances', 0)} instances)\")
             print(f\"Relays recovered by CV: {cv.get('relays_improved', 'N/A')}\")
+        elif scan_type == 'split':
+            print(f\"Scan Mode: Split ({scan.get('instances', 0)} instances)\")
 except Exception as e:
     print(f'Could not read results: {e}')
 " 2>&1
@@ -532,6 +537,19 @@ aggregate_results() {
     local aggregate_cmd="python3 $DEPLOY_DIR/scripts/aggregate_results.py"
     aggregate_cmd="$aggregate_cmd --input $merged_dir"
     aggregate_cmd="$aggregate_cmd --output $report_file"
+    
+    # Pass scan mode info based on MODE
+    case "$MODE" in
+        single)
+            aggregate_cmd="$aggregate_cmd --scan-type single --scan-instances 1"
+            ;;
+        cross-validate)
+            aggregate_cmd="$aggregate_cmd --scan-type cross_validate --scan-instances $INSTANCE_COUNT"
+            ;;
+        split)
+            aggregate_cmd="$aggregate_cmd --scan-type split --scan-instances $INSTANCE_COUNT"
+            ;;
+    esac
     
     if $cross_validate; then
         aggregate_cmd="$aggregate_cmd --cross-validate"

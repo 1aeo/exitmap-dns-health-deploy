@@ -746,6 +746,16 @@
     </footer>
 
     <script>
+        // All circuit failure type keys (for extracting from metadata)
+        const CIRCUIT_FAILURE_TYPES = [
+            'circuit_timeout', 'circuit_destroyed', 'circuit_channel_closed',
+            'circuit_connect_failed', 'circuit_no_path', 'circuit_resource_limit',
+            'circuit_hibernating', 'circuit_finished', 'circuit_connection_closed',
+            'circuit_io_error', 'circuit_protocol_error', 'circuit_internal_error',
+            'circuit_requested', 'circuit_no_service', 'circuit_measurement_expired',
+            'circuit_guard_limit', 'circuit_failed'
+        ];
+        
         async function loadStats() {
             const contentEl = document.getElementById('results-content');
             const timestampEl = document.getElementById('scan-timestamp');
@@ -756,20 +766,22 @@
                 
                 const data = await response.json();
                 const meta = data.metadata || {};
-                
-                // New relay count fields (with backwards compatibility)
-                const consensusRelays = meta.consensus_relays || meta.total_relays || 0;
-                const testedRelays = meta.tested_relays || meta.total_relays || 0;
-                const relayUnreachable = meta.relay_unreachable || 0;
-                const success = meta.success || 0;
-                const dnsSuccessRate = meta.dns_success_rate_percent || meta.success_rate_percent || 0;
-                const reachabilityRate = meta.reachability_success_rate_percent || 100;
+                const scan = meta.scan || {};
                 const cv = meta.cross_validation || {};
                 
-                // Calculate DNS errors (actual categorized failures, not including unreachable)
-                const dnsErrorCount = (meta.timeout || 0) + (meta.dns_fail || 0) + (meta.wrong_ip || 0) + 
-                                      (meta.socks_error || 0) + (meta.network_error || 0) + 
-                                      (meta.exception || 0) + (meta.error || 0);
+                // Relay counts (new field names)
+                const consensusRelays = meta.consensus_relays || 0;
+                const testedRelays = meta.tested_relays || 0;
+                const unreachableRelays = meta.unreachable_relays || 0;
+                const dnsSuccess = meta.dns_success || 0;
+                const dnsSuccessRate = meta.dns_success_rate_percent || 0;
+                const reachabilityRate = meta.reachability_rate_percent || 100;
+                
+                // Calculate DNS errors (from dns_* fields)
+                const dnsErrorCount = (meta.dns_timeout || 0) + (meta.dns_fail || 0) + 
+                                      (meta.dns_wrong_ip || 0) + (meta.dns_socks_error || 0) + 
+                                      (meta.dns_network_error || 0) + (meta.dns_exception || 0) + 
+                                      (meta.dns_error || 0);
                 
                 // Update timestamp in header
                 if (meta.timestamp) {
@@ -789,7 +801,7 @@
                             <div class="metric-label">DNS Tested (${reachabilityRate.toFixed(1)}%)</div>
                         </div>
                         <div class="metric-item">
-                            <div class="metric-value ${dnsSuccessRate >= 95 ? 'success' : dnsSuccessRate >= 80 ? 'warning' : 'error'}">${success.toLocaleString()}</div>
+                            <div class="metric-value ${dnsSuccessRate >= 95 ? 'success' : dnsSuccessRate >= 80 ? 'warning' : 'error'}">${dnsSuccess.toLocaleString()}</div>
                             <div class="metric-label">DNS Success (${dnsSuccessRate.toFixed(1)}%)</div>
                         </div>
                         <div class="metric-item">
@@ -797,7 +809,7 @@
                             <div class="metric-label">DNS Errors</div>
                         </div>
                         <div class="metric-item">
-                            <div class="metric-value error">${relayUnreachable.toLocaleString()}</div>
+                            <div class="metric-value error">${unreachableRelays.toLocaleString()}</div>
                             <div class="metric-label">Unreachable Relays</div>
                         </div>
                     </div>
@@ -806,19 +818,21 @@
                 // Row 1: Configuration
                 const configItems = [];
                 
-                // Determine validation mode (Single Instance, Cross Validation, Split)
+                // Determine validation mode from scan.type
                 let validationMode = 'Single Instance';
-                if (cv.enabled) {
-                    validationMode = `Cross Validation (${cv.instances} instances)`;
-                } else if (meta.split_mode) {
-                    validationMode = `Split (${meta.split_instances || 2} instances)`;
+                const scanType = scan.type || 'single';
+                const scanInstances = scan.instances || 1;
+                if (scanType === 'cross_validate') {
+                    validationMode = `Cross Validation (${scanInstances} instances)`;
+                } else if (scanType === 'split') {
+                    validationMode = `Split (${scanInstances} instances)`;
                 }
-                configItems.push(`<span class="detail-label">DNS Validation Mode:</span> <span class="detail-value">${validationMode}</span>`);
+                configItems.push(`<span class="detail-label">Scan Mode:</span> <span class="detail-value">${validationMode}</span>`);
                 
                 // DNS Validation Type (wildcard, etc.)
-                configItems.push(`<span class="detail-label">DNS Validation Type:</span> <span class="detail-value">${meta.mode || 'Wildcard'}</span>`);
+                configItems.push(`<span class="detail-label">DNS Type:</span> <span class="detail-value">${meta.mode || 'wildcard'}</span>`);
                 
-                if (cv.enabled && cv.relays_improved) {
+                if (scanType === 'cross_validate' && cv.relays_improved) {
                     configItems.push(`<span class="detail-label">Relays Recovered:</span> <span class="detail-value">${cv.relays_improved.toLocaleString()}</span>`);
                 }
                 
@@ -834,28 +848,30 @@
                 // Row 2: Results breakdown - hierarchical DNS and Circuit errors
                 const statusColors = {
                     success: 'var(--status-success)',
-                    timeout: 'var(--status-warning)',
+                    dns_timeout: 'var(--status-warning)',
                     dns_fail: 'var(--status-error)',
-                    exception: 'var(--aeo-text-muted)',
-                    wrong_ip: 'var(--status-purple)',
-                    socks_error: 'var(--aeo-text-muted)',
-                    network_error: 'var(--aeo-text-muted)',
-                    error: 'var(--aeo-text-muted)',
+                    dns_exception: 'var(--aeo-text-muted)',
+                    dns_wrong_ip: 'var(--status-purple)',
+                    dns_socks_error: 'var(--aeo-text-muted)',
+                    dns_network_error: 'var(--aeo-text-muted)',
+                    dns_error: 'var(--aeo-text-muted)',
                     relay_unreachable: 'var(--status-warning)',
                     circuit_timeout: 'var(--status-warning)',
                     circuit_destroyed: 'var(--status-error)',
-                    channel_closed: 'var(--status-warning)'
+                    circuit_channel_closed: 'var(--status-warning)',
+                    circuit_connect_failed: 'var(--status-warning)',
+                    circuit_failed: 'var(--aeo-text-muted)'
                 };
                 
-                // DNS Errors (from metadata counts)
+                // DNS Errors (from dns_* metadata fields)
                 const dnsErrors = {
-                    timeout: meta.timeout || 0,
+                    dns_timeout: meta.dns_timeout || 0,
                     dns_fail: meta.dns_fail || 0,
-                    wrong_ip: meta.wrong_ip || 0,
-                    socks_error: meta.socks_error || 0,
-                    network_error: meta.network_error || 0,
-                    exception: meta.exception || 0,
-                    error: meta.error || 0
+                    dns_wrong_ip: meta.dns_wrong_ip || 0,
+                    dns_socks_error: meta.dns_socks_error || 0,
+                    dns_network_error: meta.dns_network_error || 0,
+                    dns_exception: meta.dns_exception || 0,
+                    dns_error: meta.dns_error || 0
                 };
                 const dnsErrorTotal = Object.values(dnsErrors).reduce((a, b) => a + b, 0);
                 const topDnsErrors = Object.entries(dnsErrors)
@@ -863,11 +879,14 @@
                     .sort((a, b) => b[1] - a[1])
                     .slice(0, 3);
                 
-                // Circuit Errors (from circuit_failure_reasons)
-                const circuitReasons = meta.circuit_failure_reasons || {};
-                const circuitErrorTotal = Object.values(circuitReasons).reduce((a, b) => a + b, 0);
-                const topCircuitErrors = Object.entries(circuitReasons)
-                    .filter(([_, count]) => count > 0)
+                // Circuit Errors (from flat circuit_* fields)
+                const circuitErrors = {};
+                CIRCUIT_FAILURE_TYPES.forEach(key => {
+                    const count = meta[key] || 0;
+                    if (count > 0) circuitErrors[key] = count;
+                });
+                const circuitErrorTotal = Object.values(circuitErrors).reduce((a, b) => a + b, 0);
+                const topCircuitErrors = Object.entries(circuitErrors)
                     .sort((a, b) => b[1] - a[1])
                     .slice(0, 3);
                 
@@ -890,7 +909,7 @@
                                 </div>
                                 <div style="display: flex; flex-direction: column; gap: 0.15rem; font-size: 0.8rem;">
                                     ${topDnsErrors.map(([status, count]) => 
-                                        `<div style="display: flex; justify-content: space-between; gap: 1rem;"><span style="color: var(--aeo-text-muted);">${status}</span><span style="color: ${statusColors[status]}; font-family: monospace;">${count.toLocaleString()}</span></div>`
+                                        `<div style="display: flex; justify-content: space-between; gap: 1rem;"><span style="color: var(--aeo-text-muted);">${status.replace('dns_', '')}</span><span style="color: ${statusColors[status] || 'var(--aeo-text-muted)'}; font-family: monospace;">${count.toLocaleString()}</span></div>`
                                     ).join('')}
                                 </div>
                             </div>
@@ -908,7 +927,7 @@
                                 </div>
                                 <div style="display: flex; flex-direction: column; gap: 0.15rem; font-size: 0.8rem;">
                                     ${topCircuitErrors.map(([status, count]) => 
-                                        `<div style="display: flex; justify-content: space-between; gap: 1rem;"><span style="color: var(--aeo-text-muted);">${status}</span><span style="color: ${statusColors[status]}; font-family: monospace;">${count.toLocaleString()}</span></div>`
+                                        `<div style="display: flex; justify-content: space-between; gap: 1rem;"><span style="color: var(--aeo-text-muted);">${status.replace('circuit_', '')}</span><span style="color: ${statusColors[status] || 'var(--aeo-text-muted)'}; font-family: monospace;">${count.toLocaleString()}</span></div>`
                                     ).join('')}
                                 </div>
                             </div>
@@ -959,12 +978,19 @@
                     '⏱️'
                 );
                 
+                // Compute failures from results (no longer stored in separate array)
+                const results = data.results || [];
+                const failures = results.filter(r => r.status !== 'success');
+                
                 // Failed relays section (connected, not separate)
-                if (data.failures && data.failures.length > 0) {
+                if (failures.length > 0) {
+                    // Generate tor_metrics_url from fingerprint
+                    const getTorMetricsUrl = (fp) => fp ? `https://metrics.torproject.org/rs.html#details/${fp}` : '#';
+                    
                     html += `
                         <div class="subsection-header" style="border-top: 1px solid var(--aeo-border-solid); padding-top: 1rem; margin-top: 0;">
                             <span class="subsection-title">⚠️ Failed Relays</span>
-                            <span class="subsection-count">${data.failures.length} relays</span>
+                            <span class="subsection-count">${failures.length} relays</span>
                         </div>
                         <table class="failures-table">
                             <thead>
@@ -978,21 +1004,21 @@
                             <tbody>
                     `;
                     
-                    const displayFailures = data.failures.slice(0, 50);
+                    const displayFailures = failures.slice(0, 50);
                     html += displayFailures.map(f => `
                         <tr>
                             <td><strong>${escapeHtml(f.exit_nickname || 'Unknown')}</strong></td>
-                            <td class="fingerprint">${f.exit_fingerprint || ''}</td>
+                            <td class="fingerprint"><a href="${getTorMetricsUrl(f.exit_fingerprint)}" target="_blank" rel="noopener">${f.exit_fingerprint || ''}</a></td>
                             <td><span class="status-badge ${f.status || 'error'}">${f.status || 'error'}</span></td>
                             <td style="color: var(--aeo-text-muted); font-size: 0.8rem;" title="${escapeHtml(f.error || '')}">${escapeHtml((f.error || '').slice(0, 120))}${(f.error || '').length > 120 ? '...' : ''}</td>
                         </tr>
                     `).join('');
                     
-                    if (data.failures.length > 50) {
+                    if (failures.length > 50) {
                         html += `
                             <tr>
                                 <td colspan="4" style="text-align: center; color: var(--aeo-text-dim); padding: 1rem;">
-                                    ... and ${data.failures.length - 50} more failures
+                                    ... and ${failures.length - 50} more failures
                                 </td>
                             </tr>
                         `;
