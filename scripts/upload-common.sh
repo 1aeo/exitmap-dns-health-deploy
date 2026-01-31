@@ -28,7 +28,7 @@ init_upload() {
     TIMESTAMP=$(get_timestamp)
     
     ensure_dir "$LOG_DIR"
-    ensure_dir "$BACKUP_DIR"
+    ensure_dir "$BACKUP_DIR" 700  # Restrict backup access to owner only
     
     # Rclone defaults (can override per-backend)
     : "${TRANSFERS:=64}" "${CHECKERS:=128}" "${BUFFER:=64M}" "${S3_CONC:=16}" "${S3_CHUNK:=16M}"
