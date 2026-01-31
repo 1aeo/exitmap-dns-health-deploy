@@ -498,7 +498,12 @@ def aggregate_results(results, previous_report=None, circuit_failures=None, scan
     # Calculate totals and rates from actual results (source of truth)
     total = len(results)
     unreachable_relays = stats.get("relay_unreachable", 0)
-    tested_relays = total - unreachable_relays
+    
+    # Infrastructure errors: local Tor issues, relay was NOT actually tested
+    infra_errors = stats.get("tor_connection_refused", 0) + stats.get("tor_connection_lost", 0)
+    
+    # Tested relays = total minus unreachable minus infrastructure errors
+    tested_relays = total - unreachable_relays - infra_errors
     
     # Use scan_stats for consensus count only (total attempted)
     if scan_stats and scan_stats.get("total_circuits", 0) > 0:
@@ -511,8 +516,10 @@ def aggregate_results(results, previous_report=None, circuit_failures=None, scan
     else:
         consensus_relays = total
     
-    print("Counts: %d consensus, %d tested, %d unreachable (from %d result files)" % (
-        consensus_relays, tested_relays, unreachable_relays, total))
+    if infra_errors > 0:
+        print("Warning: %d results have infrastructure errors (local Tor issues, not actually tested)" % infra_errors)
+    print("Counts: %d consensus, %d tested, %d unreachable, %d infra errors (from %d result files)" % (
+        consensus_relays, tested_relays, unreachable_relays, infra_errors, total))
     
     dns_success = stats.get("success", 0)
     
@@ -540,16 +547,21 @@ def aggregate_results(results, previous_report=None, circuit_failures=None, scan
         "tested_relays": tested_relays,
         "unreachable_relays": unreachable_relays,
         
-        # DNS test results (all categories with dns_ prefix)
+        # DNS test results (relays that were reached and tested)
         "dns_success": dns_success,
         "dns_fail": stats.get("dns_fail", 0),
         "dns_timeout": stats.get("timeout", 0) + stats.get("hard_timeout", 0),
         "dns_wrong_ip": stats.get("wrong_ip", 0),
         "dns_socks_error": stats.get("socks_error", 0),
-        "dns_network_error": stats.get("network_error", 0) + stats.get("tor_connection_refused", 0) + stats.get("tor_connection_lost", 0) + stats.get("eof_error", 0),
+        "dns_network_error": stats.get("network_error", 0) + stats.get("eof_error", 0),
         "dns_error": stats.get("error", 0),
         "dns_exception": stats.get("exception", 0),
         "dns_unknown": stats.get("unknown", 0),
+        
+        # Infrastructure errors (local Tor process issues, not relay/DNS issues)
+        # These relays were NOT actually tested - the local Tor refused/lost connection
+        "infra_tor_refused": stats.get("tor_connection_refused", 0),
+        "infra_tor_lost": stats.get("tor_connection_lost", 0),
     }
     
     # Add all 17 circuit failure types with explicit zeros
@@ -596,10 +608,15 @@ def print_summary(report):
     consensus = m.get("consensus_relays", 0)
     tested = m.get("tested_relays", 0)
     unreachable = m.get("unreachable_relays", 0)
+    infra_refused = m.get("infra_tor_refused", 0)
+    infra_lost = m.get("infra_tor_lost", 0)
+    infra_total = infra_refused + infra_lost
     print("RELAY COUNTS:")
     print("  Consensus Relays:    %5d" % consensus)
     print("  Tested (reachable):  %5d  (%.2f%%)" % (tested, m.get("reachability_rate_percent", 0)))
     print("  Unreachable Relays:  %5d" % unreachable)
+    if infra_total > 0:
+        print("  Infra Errors:        %5d  (local Tor issues, NOT tested)" % infra_total)
     print()
     
     print("DNS TEST RESULTS (of %d tested relays):" % tested)
