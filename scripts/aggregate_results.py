@@ -458,10 +458,11 @@ def aggregate_results(results, previous_report=None, circuit_failures=None, scan
             if fp and fp not in dns_fingerprints:
                 results.append(cf)
                 dns_fingerprints.add(fp)
-            # Track circuit failure reasons (normalize to circuit_* keys)
-            raw_reason = cf.get("circuit_reason", "circuit_failed")
-            normalized_key = _normalize_circuit_reason(raw_reason)
-            circuit_counts[normalized_key] += 1
+                # Track circuit failure reasons (normalize to circuit_* keys)
+                # Only count circuit failures that are actually added (not filtered duplicates)
+                raw_reason = cf.get("circuit_reason", "circuit_failed")
+                normalized_key = _normalize_circuit_reason(raw_reason)
+                circuit_counts[normalized_key] += 1
 
     # Extract run_id and mode from first result (same for all)
     run_id = None
