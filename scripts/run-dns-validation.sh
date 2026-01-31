@@ -67,6 +67,22 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Validate command-line arguments
+validate_args() {
+    # Validate INSTANCE_COUNT is positive integer between 1-16
+    if [[ "$MODE" != "single" ]]; then
+        if ! [[ "$INSTANCE_COUNT" =~ ^[0-9]+$ ]]; then
+            echo "Error: Instance count must be a number, got: $INSTANCE_COUNT" >&2
+            exit 1
+        fi
+        if [[ "$INSTANCE_COUNT" -lt 1 ]] || [[ "$INSTANCE_COUNT" -gt 16 ]]; then
+            echo "Error: Instance count must be 1-16, got: $INSTANCE_COUNT" >&2
+            exit 1
+        fi
+    fi
+}
+validate_args
+
 # Load configuration
 if [[ -f "$DEPLOY_DIR/config.env" ]]; then
     source "$DEPLOY_DIR/config.env"
@@ -81,6 +97,7 @@ fi
 OUTPUT_DIR="${OUTPUT_DIR:-$DEPLOY_DIR/public}"
 LOG_DIR="${LOG_DIR:-$DEPLOY_DIR/logs}"
 TMP_DIR="${TMP_DIR:-$DEPLOY_DIR/tmp}"
+LOCK_FILE="${TMP_DIR}/exitmap_dns_health.lock"
 BUILD_DELAY="${BUILD_DELAY:-0}"
 DELAY_NOISE="${DELAY_NOISE:-0}"
 
@@ -145,7 +162,6 @@ if [[ ! -f "$EXITMAP_BIN" ]]; then
 fi
 
 TIMESTAMP=$(date +%Y-%m-%d_%H-%M-%S)
-LOCK_FILE="/tmp/exitmap_dns_health.lock"
 # Single unified log file for both script and exitmap output
 UNIFIED_LOG="$LOG_DIR/validation_${TIMESTAMP}.log"
 
@@ -217,10 +233,52 @@ acquire_lock() {
     echo $$ >&9
 }
 
-# Cleanup functions
+# === Process Management ===
+# Global array to track managed process IDs (safer than pkill patterns)
+declare -a MANAGED_PIDS=()
+declare -a MANAGED_TOR_DIRS=()
+
+# Register a PID for cleanup tracking
+register_pid() {
+    MANAGED_PIDS+=("$1")
+}
+
+# Kill a process and its children by PID (safer than pattern matching)
+kill_process_tree() {
+    local pid=$1
+    [[ -z "$pid" ]] && return
+    
+    # Check if process exists
+    kill -0 "$pid" 2>/dev/null || return 0
+    
+    # Get process group ID and kill the group
+    local pgid
+    pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ') || true
+    
+    if [[ -n "$pgid" ]] && [[ "$pgid" != "0" ]]; then
+        # Kill process group (negative PID)
+        kill -TERM -"$pgid" 2>/dev/null || true
+        sleep 0.5
+        kill -9 -"$pgid" 2>/dev/null || true
+    else
+        # Fallback: kill individual process
+        kill -TERM "$pid" 2>/dev/null || true
+        sleep 0.5
+        kill -9 "$pid" 2>/dev/null || true
+    fi
+}
+
+# Cleanup a single tor directory (without pkill pattern matching)
 cleanup_instance() {
     local tor_dir=$1
-    pkill -9 -f "tor -f.*$tor_dir" 2>/dev/null || true
+    
+    # Find and kill tor process by its PID file if it exists
+    local tor_pid_file="$tor_dir/tor.pid"
+    if [[ -f "$tor_pid_file" ]]; then
+        local tor_pid
+        tor_pid=$(cat "$tor_pid_file" 2>/dev/null) || true
+        [[ -n "$tor_pid" ]] && kill_process_tree "$tor_pid"
+    fi
     
     # Preserve cached-* files for faster Tor bootstrap (valid ~3 hours)
     # Delete everything else (lock, keys, state, auth cookies)
@@ -237,30 +295,40 @@ cleanup_instance() {
 cleanup_all() {
     log "Cleaning up..."
     
-    # Kill all child processes of this script first (catches subshells and their children)
-    pkill -9 -P $$ 2>/dev/null || true
+    # 1. Kill all tracked/managed PIDs first (safe - we started these)
+    for pid in "${MANAGED_PIDS[@]:-}"; do
+        kill_process_tree "$pid"
+    done
+    MANAGED_PIDS=()
     
-    # Kill all exitmap processes (including orphaned ones from this run)
-    # Use multiple patterns to ensure we catch everything
-    pkill -9 -f "exitmap dnshealth" 2>/dev/null || true
-    pkill -9 -f "bin/exitmap" 2>/dev/null || true
+    # 2. Kill all direct child processes of this script (safe - only our children)
+    # This catches any background processes we spawned
+    local children
+    children=$(pgrep -P $$ 2>/dev/null) || true
+    for child_pid in $children; do
+        kill_process_tree "$child_pid"
+    done
     
-    # Kill tor processes started by exitmap
-    pkill -9 -f "tor -f.*exitmap_tor" 2>/dev/null || true
-    pkill -9 -f "tor -f - __OwningControllerProcess" 2>/dev/null || true
+    # 3. Clean up tracked tor directories
+    for tor_dir in "${MANAGED_TOR_DIRS[@]:-}"; do
+        cleanup_instance "$tor_dir"
+    done
+    MANAGED_TOR_DIRS=()
     
-    # Wait briefly then kill any stragglers
-    sleep 1
-    pkill -9 -f "exitmap" 2>/dev/null || true
-    pkill -9 -f "tor -f" 2>/dev/null || true
-    
-    # Clean up all possible tor directories (preserve cached-* for faster next bootstrap)
-    for i in $(seq 1 10); do
+    # 4. Clean up any remaining tor directories from known paths
+    for i in $(seq 1 16); do
         cleanup_instance "$TMP_DIR/exitmap_tor_$i"
+        cleanup_instance "$TMP_DIR/exitmap_tor_w${i}_1"
+        cleanup_instance "$TMP_DIR/exitmap_tor_w${i}_2"
+        cleanup_instance "$TMP_DIR/exitmap_tor_w${i}_3"
+        cleanup_instance "$TMP_DIR/exitmap_tor_w${i}_4"
     done
     cleanup_instance "$TMP_DIR/exitmap_tor"
+    cleanup_instance "$TMP_DIR/exitmap_tor_temp"
+    
+    # 5. Cleanup temp files
     rm -f "$LOCK_FILE" 2>/dev/null || true
-    rm -f /tmp/exitmap_fps_*.txt 2>/dev/null || true
+    rm -f "$TMP_DIR"/exitmap_fps_*.txt 2>/dev/null || true
 }
 
 # Helper: Save cached Tor files to persistent storage
@@ -356,30 +424,30 @@ wait_for_scan() {
         local elapsed=$((now - start_time))
         local count=$(count_results "$analysis_dir")
         
-        # Extract progress info from exitmap log
+        # Extract progress info from exitmap log (using Python for safe parsing)
         local probes_sent=""
         local results_breakdown=""
+        local results_pct=""
         if [[ -f "$log_file" ]]; then
-            # Single awk pass: extract progress info AND count results
-            read probed total pct total_ok total_timeout total_failed <<< $(awk '
-                /Probed [0-9]+ out of [0-9]+ exit relays.*% done/ {
-                    # Extract: "Probed 123 out of 456 exit relays, so we are 27.00% done."
-                    for (i=1; i<=NF; i++) {
-                        if ($i == "Probed") probed = $(i+1)
-                        if ($i == "of") total = $(i+1)
-                        if ($i ~ /^[0-9]+\.[0-9]+%$/) pct = substr($i, 1, length($i)-1)
-                    }
-                }
-                /(correct)/ { ok++ }
-                /\[timeout\]/ { to++ }
-                /\[FAILED\]/ { fail++ }
-                END { print probed+0, total+0, pct+0, ok+0, to+0, fail+0 }
-            ' "$log_file" 2>/dev/null)
+            # Use Python helper for safe log parsing (no shell injection risk)
+            local progress_json
+            progress_json=$(python3 "$DEPLOY_DIR/scripts/parse_exitmap_log.py" "$log_file" 2>/dev/null) || progress_json='{}'
+            
+            # Extract values from JSON using Python (safer than jq dependency)
+            local probed total pct total_ok total_timeout total_failed
+            read probed total pct total_ok total_timeout total_failed <<< $(python3 -c "
+import json, sys
+try:
+    d = json.loads('$progress_json')
+    print(d.get('probed',0), d.get('total',0), d.get('pct',0), d.get('ok',0), d.get('timeout',0), d.get('failed',0))
+except: print('0 0 0 0 0 0')
+" 2>/dev/null)
             
             if [[ "$probed" -gt 0 ]] && [[ "$total" -gt 0 ]]; then
                 probes_sent="${probed}/${total} (${pct}%) probes sent"
                 results_breakdown="${total_ok}ok/${total_timeout}to/${total_failed}fail"
-                results_pct=$(awk "BEGIN {printf \"%.2f\", $count * 100 / $total}")
+                # Calculate percentage using Python (safe arithmetic)
+                results_pct=$(python3 -c "print(f'{$count * 100 / $total:.2f}')" 2>/dev/null || echo "0.00")
             fi
         fi
         
@@ -441,6 +509,9 @@ run_instance() {
         cmd="$cmd --all-exits"
     fi
     
+    # Track this tor directory for cleanup
+    MANAGED_TOR_DIRS+=("$tor_dir")
+    
     # Retry loop
     for attempt in $(seq 1 "$TOR_MAX_BOOTSTRAP_RETRIES"); do
         log "$instance_name: Attempt $attempt/$TOR_MAX_BOOTSTRAP_RETRIES"
@@ -448,17 +519,18 @@ run_instance() {
         # Prepare tor directory (cleanup + create + restore cache)
         prepare_tor_dir "$tor_dir"
         
-        # Start exitmap (append to log file so script messages aren't overwritten)
+        # Start exitmap in its own process group for clean termination
         # PYTHONUNBUFFERED=1 forces immediate output so progress lines are visible in real-time
-        PYTHONUNBUFFERED=1 $cmd >> "$log_file" 2>&1 &
+        setsid bash -c "PYTHONUNBUFFERED=1 $cmd" >> "$log_file" 2>&1 &
         local pid=$!
+        register_pid "$pid"
         
         # Wait for bootstrap
         if wait_for_bootstrap "$log_file" "$instance_name" "$tor_dir"; then
             # Bootstrap succeeded, wait for scan
             wait_for_scan "$log_file" "$analysis_dir" "$instance_name"
-            # Kill the process after scan completes or stalls (it may still be running)
-            kill -9 "$pid" 2>/dev/null || true
+            # Kill the process tree after scan completes or stalls (it may still be running)
+            kill_process_tree "$pid"
             wait $pid 2>/dev/null || true
             
             local count=$(count_results "$analysis_dir")
@@ -470,8 +542,8 @@ run_instance() {
             fi
         fi
         
-        # Kill and retry
-        kill -9 "$pid" 2>/dev/null || true
+        # Kill process tree and retry
+        kill_process_tree "$pid"
         cleanup_instance "$tor_dir"
         
         if [ $attempt -lt "$TOR_MAX_BOOTSTRAP_RETRIES" ]; then
@@ -905,7 +977,7 @@ run_cross_validate_waves() {
     log "Instances: $n, Batch size: $WAVE_BATCH_SIZE relays/wave"
     
     # Get all fingerprints
-    local fps_all="/tmp/exitmap_fps_all_${TIMESTAMP}"
+    local fps_all="${TMP_DIR}/exitmap_fps_all_${TIMESTAMP}"
     if ! get_all_fingerprints "$fps_all"; then
         log "Failed to get relay fingerprints"
         return 1
@@ -932,7 +1004,7 @@ run_cross_validate_waves() {
         local end_line=$(( wave * WAVE_BATCH_SIZE ))
         
         # Extract this wave's fingerprints
-        local wave_file="/tmp/exitmap_fps_wave${wave}_${TIMESTAMP}"
+        local wave_file="${TMP_DIR}/exitmap_fps_wave${wave}_${TIMESTAMP}"
         sed -n "${start_line},${end_line}p" "$fps_all" > "$wave_file"
         
         if run_wave_with_retry "$wave" "$total_waves" "$wave_file" "$n"; then
@@ -1035,7 +1107,7 @@ except Exception as e:
     fi
     
     # Extract and split fingerprints (set global FPS_BASE for helper)
-    FPS_BASE="/tmp/exitmap_fps_${TIMESTAMP}"
+    FPS_BASE="${TMP_DIR}/exitmap_fps_${TIMESTAMP}"
     log "Extracting and splitting relay fingerprints..."
     python3 "$DEPLOY_DIR/scripts/get_exit_fingerprints.py" \
         "$temp_tor_dir" \
