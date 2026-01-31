@@ -540,13 +540,13 @@ def aggregate_results(results, previous_report=None, circuit_failures=None, scan
         "tested_relays": tested_relays,
         "unreachable_relays": unreachable_relays,
         
-        # DNS test results (all 9 with dns_ prefix)
+        # DNS test results (all categories with dns_ prefix)
         "dns_success": dns_success,
         "dns_fail": stats.get("dns_fail", 0),
-        "dns_timeout": stats.get("timeout", 0),
+        "dns_timeout": stats.get("timeout", 0) + stats.get("hard_timeout", 0),
         "dns_wrong_ip": stats.get("wrong_ip", 0),
         "dns_socks_error": stats.get("socks_error", 0),
-        "dns_network_error": stats.get("network_error", 0),
+        "dns_network_error": stats.get("network_error", 0) + stats.get("tor_connection_refused", 0) + stats.get("tor_connection_lost", 0) + stats.get("eof_error", 0),
         "dns_error": stats.get("error", 0),
         "dns_exception": stats.get("exception", 0),
         "dns_unknown": stats.get("unknown", 0),
