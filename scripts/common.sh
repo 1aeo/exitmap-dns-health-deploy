@@ -41,25 +41,81 @@ validate_config() {
     return 0
 }
 
+# Validate config values are safe (no shell injection, valid types)
+# Call after sourcing config to ensure values are sanitized
+validate_config_values() {
+    local errors=0
+    
+    # Pattern for safe path characters (alphanumeric, underscore, dash, dot, slash, $, ~)
+    local path_pattern='^[a-zA-Z0-9_./$~-]+$'
+    
+    # Validate path variables don't contain shell metacharacters
+    for var in DEPLOY_PATH OUTPUT_DIR LOG_DIR BACKUP_DIR TMP_DIR EXITMAP_DIR RCLONE_PATH; do
+        local value="${!var:-}"
+        if [[ -n "$value" ]] && ! [[ "$value" =~ $path_pattern ]]; then
+            echo "Error: $var contains invalid characters: $value" >&2
+            ((errors++))
+        fi
+    done
+    
+    # Validate numeric values
+    for var in CACHE_TTL_LATEST CACHE_TTL_HISTORICAL BUILD_DELAY DELAY_NOISE \
+               DNS_QUERY_TIMEOUT DNS_MAX_RETRIES DNS_HARD_TIMEOUT \
+               TOR_BOOTSTRAP_TIMEOUT TOR_MAX_BOOTSTRAP_RETRIES TOR_PROGRESS_CHECK_INTERVAL \
+               WAVE_BATCH_SIZE WAVE_MAX_RETRIES MAX_PENDING_CIRCUITS \
+               RCLONE_TRANSFERS RCLONE_CHECKERS DO_RCLONE_TRANSFERS DO_RCLONE_CHECKERS \
+               ANALYSIS_KEEP_COUNT EXITMAP_GRACE_TIMEOUT; do
+        local value="${!var:-}"
+        if [[ -n "$value" ]] && ! [[ "$value" =~ ^[0-9]+$ ]]; then
+            echo "Error: $var must be numeric, got: $value" >&2
+            ((errors++))
+        fi
+    done
+    
+    # Validate boolean values
+    for var in DO_ENABLED R2_ENABLED CLOUD_UPLOAD ALL_EXITS RELIABLE_FIRST_HOP \
+               CLEANUP_OLD DO_SPACES_CDN; do
+        local value="${!var:-}"
+        if [[ -n "$value" ]] && ! [[ "$value" =~ ^(true|false)$ ]]; then
+            echo "Error: $var must be true/false, got: $value" >&2
+            ((errors++))
+        fi
+    done
+    
+    # Validate DNS_RETRY_DELAY is a valid float
+    if [[ -n "${DNS_RETRY_DELAY:-}" ]] && ! [[ "$DNS_RETRY_DELAY" =~ ^[0-9]+\.?[0-9]*$ ]]; then
+        echo "Error: DNS_RETRY_DELAY must be numeric, got: $DNS_RETRY_DELAY" >&2
+        ((errors++))
+    fi
+    
+    [[ $errors -eq 0 ]] || return 1
+}
+
 # Load config with validation (tries deploy dir first, then exitmap root)
 load_config() {
     local config_file="${1:-}"
+    local loaded=false
     
     if [[ -n "$config_file" && -f "$config_file" ]]; then
         validate_config "$config_file"
         source "$config_file"
-        return 0
-    fi
-    
-    if [[ -f "$DEPLOY_DIR/config.env" ]]; then
+        loaded=true
+    elif [[ -f "$DEPLOY_DIR/config.env" ]]; then
         validate_config "$DEPLOY_DIR/config.env"
         source "$DEPLOY_DIR/config.env"
-        return 0
-    fi
-    
-    if [[ -f "$EXITMAP_DIR/config.env" ]]; then
+        loaded=true
+    elif [[ -f "$EXITMAP_DIR/config.env" ]]; then
         validate_config "$EXITMAP_DIR/config.env"
         source "$EXITMAP_DIR/config.env"
+        loaded=true
+    fi
+    
+    if $loaded; then
+        # Validate sourced values are safe
+        validate_config_values || {
+            echo "Error: Config validation failed. Fix the above errors in config.env" >&2
+            return 1
+        }
         return 0
     fi
     
@@ -86,10 +142,16 @@ validate_pattern() {
     [[ "$value" =~ $pattern ]] || { log_error "Invalid $name: $value"; return 1; }
 }
 
-# Create directory if it doesn't exist
+# Create directory if it doesn't exist, with optional mode
+# Usage: ensure_dir /path/to/dir [mode]
+# Example: ensure_dir "$BACKUP_DIR" 700
 ensure_dir() {
     local dir="$1"
-    [[ -d "$dir" ]] || mkdir -p "$dir"
+    local mode="${2:-755}"
+    if [[ ! -d "$dir" ]]; then
+        mkdir -p "$dir"
+        chmod "$mode" "$dir"
+    fi
 }
 
 # Get timestamp for filenames
