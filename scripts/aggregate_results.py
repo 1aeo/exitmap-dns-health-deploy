@@ -191,10 +191,19 @@ def load_results(input_dir):
 
 
 def _get_instance_name(source_dir):
-    """Extract instance name from source directory path."""
-    # /path/to/analysis_2026-01-17_15-49-26_cv2 -> cv2
+    """Extract instance name from source directory path.
+    
+    Handles both regular and wave-based naming:
+      /path/to/analysis_2026-01-17_15-49-26_cv2 -> cv2
+      /path/to/analysis_2026-01-17_15-49-26_cv1_w1 -> cv1_w1
+    """
     basename = os.path.basename(source_dir.rstrip('/'))
     parts = basename.split('_')
+    
+    # Wave mode: last two parts are cvN and wM (e.g., cv1_w1)
+    if len(parts) >= 2 and parts[-1].startswith('w') and parts[-2].startswith('cv'):
+        return f"{parts[-2]}_{parts[-1]}"
+    
     return parts[-1] if parts else basename
 
 
@@ -454,14 +463,13 @@ def aggregate_results(results, previous_report=None, circuit_failures=None, scan
     if circuit_failures:
         for cf in circuit_failures:
             fp = cf.get("exit_fingerprint")
-            # Only add if not already in DNS results (avoid duplicates)
+            # Only count circuit failures for relays not already in results
+            # (cross-validation: relay may have failed in one instance but succeeded in another)
             if fp and fp not in dns_fingerprints:
                 results.append(cf)
                 dns_fingerprints.add(fp)
-            # Track circuit failure reasons (normalize to circuit_* keys)
-            raw_reason = cf.get("circuit_reason", "circuit_failed")
-            normalized_key = _normalize_circuit_reason(raw_reason)
-            circuit_counts[normalized_key] += 1
+                raw_reason = cf.get("circuit_reason", "circuit_failed")
+                circuit_counts[_normalize_circuit_reason(raw_reason)] += 1
 
     # Extract run_id and mode from first result (same for all)
     run_id = None
@@ -686,6 +694,8 @@ def main():
                         help="Scan mode type for metadata")
     parser.add_argument("--scan-instances", type=int, default=1,
                         help="Number of instances used in scan")
+    parser.add_argument("--wave-stats", type=str, default=None,
+                        help="JSON lines file with wave timing data (for wave-based cross-validation)")
     args = parser.parse_args()
 
     cv_stats = None
@@ -762,6 +772,38 @@ def main():
                 for name, counts in cv_stats.get("per_instance_stats", {}).items()
             },
         }
+
+    # Add wave metadata if wave-stats file provided
+    if args.wave_stats and os.path.exists(args.wave_stats):
+        try:
+            with open(args.wave_stats) as f:
+                wave_data = [json.loads(line) for line in f if line.strip()]
+            
+            if wave_data:
+                total_relays = sum(w.get("relays", 0) for w in wave_data)
+                total_retries = sum(w.get("retries", 0) for w in wave_data)
+                
+                report["metadata"]["scan"]["waves"] = {
+                    "enabled": True,
+                    "batch_size": wave_data[0].get("batch_size", 0),
+                    "total_waves": len(wave_data),
+                    "total_relays": total_relays,
+                    "total_retries": total_retries,
+                    "max_retries_config": int(os.environ.get("WAVE_MAX_RETRIES", 2)),
+                    "completed": wave_data,
+                }
+                
+                # Fix consensus_relays: scan_stats.json has per-wave counts, use wave total
+                if total_relays > report["metadata"]["consensus_relays"]:
+                    print("Fixed consensus_relays: %d -> %d (from wave totals)" % (
+                        report["metadata"]["consensus_relays"], total_relays))
+                    report["metadata"]["consensus_relays"] = total_relays
+                    report["metadata"]["reachability_rate_percent"] = round(
+                        report["metadata"]["tested_relays"] / total_relays * 100, 2)
+                
+                print("Added wave metadata: %d waves, %d total retries" % (len(wave_data), total_retries))
+        except Exception as e:
+            print("Warning: Could not load wave stats: %s" % e)
 
     with open(args.output, "w") as f:
         json.dump(report, f)
