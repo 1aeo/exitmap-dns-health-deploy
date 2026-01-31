@@ -129,18 +129,21 @@ if [[ "$DRY_RUN" == "true" ]]; then
     exit 0
 fi
 
-# Deploy
-export CLOUDFLARE_API_TOKEN="$CLOUDFLARE_API_TOKEN"
-export CLOUDFLARE_ACCOUNT_ID="$CLOUDFLARE_ACCOUNT_ID"
+# Deploy (tokens exported only within subshell to minimize exposure)
 cd "$DEPLOY_DIR"
-
 WRANGLER=$(command -v wrangler 2>/dev/null || echo "npx wrangler")
 log "Deploying to Cloudflare Pages..."
 
-$WRANGLER pages deploy "$STATIC_DIR" \
-    --project-name="$PAGES_PROJECT_NAME" \
-    --branch=production \
-    --commit-dirty=true
+(
+    # Tokens only exist in this subshell, not in parent process or /proc
+    export CLOUDFLARE_API_TOKEN="$CLOUDFLARE_API_TOKEN"
+    export CLOUDFLARE_ACCOUNT_ID="$CLOUDFLARE_ACCOUNT_ID"
+    
+    $WRANGLER pages deploy "$STATIC_DIR" \
+        --project-name="$PAGES_PROJECT_NAME" \
+        --branch=production \
+        --commit-dirty=true
+)
 
 echo ""
 log_success "Deployed: https://${PAGES_PROJECT_NAME}.pages.dev"
