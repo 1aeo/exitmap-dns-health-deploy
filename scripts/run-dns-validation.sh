@@ -90,8 +90,10 @@ DELAY_NOISE="${DELAY_NOISE:-0}"
 # - 4 instances × 128 = 512 processes (too many, causes OOM)
 # Solution: Scale down per-instance circuits to keep total ~128
 if [[ "$MODE" != "single" ]] && [[ -z "${MAX_PENDING_CIRCUITS:-}" ]]; then
-    # Auto-calculate: target ~128 total concurrent circuits across all instances
-    MAX_PENDING_CIRCUITS=$((128 / INSTANCE_COUNT))
+    # Auto-calculate: target ~256 total concurrent circuits across all instances
+    MAX_PENDING_CIRCUITS=$((256 / INSTANCE_COUNT))
+    # Cap at 128 per instance (standard single-instance load)
+    [[ $MAX_PENDING_CIRCUITS -gt 128 ]] && MAX_PENDING_CIRCUITS=128
     # Minimum 16 to maintain some parallelism
     [[ $MAX_PENDING_CIRCUITS -lt 16 ]] && MAX_PENDING_CIRCUITS=16
     export MAX_PENDING_CIRCUITS
