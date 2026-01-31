@@ -242,7 +242,7 @@ async function loadStats() {
         // Failed relays section (connected, not separate)
         if (failures.length > 0) {
             // Generate tor_metrics_url from fingerprint
-            const getTorMetricsUrl = (fp) => fp ? `https://metrics.torproject.org/rs.html#details/${fp}` : '#';
+            const getTorMetricsUrl = (fp) => fp ? `https://metrics.1aeo.com/relay/${fp}/` : '#';
             
             html += `
                 <div class="subsection-header" style="border-top: 1px solid var(--aeo-border-solid); padding-top: 1rem; margin-top: 0;">
