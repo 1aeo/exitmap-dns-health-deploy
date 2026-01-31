@@ -501,16 +501,30 @@ merge_analysis_dirs() {
 }
 
 # Unified aggregation function
-# Args: output_dir [--cross-validate] analysis_dirs...
+# Args: output_dir [--cross-validate] [--wave-stats FILE] analysis_dirs...
 aggregate_results() {
     local output_dir=$1
     shift
     
     local cross_validate=false
-    if [[ "${1:-}" == "--cross-validate" ]]; then
-        cross_validate=true
-        shift
-    fi
+    local wave_stats_file=""
+    
+    # Parse optional flags
+    while [[ "${1:-}" == --* ]]; do
+        case "$1" in
+            --cross-validate)
+                cross_validate=true
+                shift
+                ;;
+            --wave-stats)
+                wave_stats_file="$2"
+                shift 2
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
     
     local analysis_dirs=("$@")
     local report_file="${output_dir}/dns_health_${TIMESTAMP}.json"
@@ -559,6 +573,9 @@ aggregate_results() {
     fi
     
     [[ -f "$latest_report" ]] && aggregate_cmd="$aggregate_cmd --previous $latest_report"
+    
+    # Add wave stats if provided
+    [[ -n "$wave_stats_file" ]] && [[ -f "$wave_stats_file" ]] && aggregate_cmd="$aggregate_cmd --wave-stats $wave_stats_file"
     
     if $aggregate_cmd --quiet; then
         log "Aggregation complete"
@@ -697,12 +714,269 @@ run_single() {
     fi
 }
 
+# =============================================================================
+# WAVE-BASED CROSS-VALIDATION
+# =============================================================================
+
+# Wave configuration (from config.env)
+WAVE_BATCH_SIZE="${WAVE_BATCH_SIZE:-0}"
+WAVE_MAX_RETRIES="${WAVE_MAX_RETRIES:-2}"
+
+# Global for tracking wave retry count
+WAVE_RETRY_COUNT=0
+
+# Log wave progress with memory and process counts
+log_wave_progress() {
+    local wave=$1
+    local phase=$2  # "start" or "end"
+    local mem_used=$(free -m | awk '/^Mem:/ {print $3}')
+    local mem_total=$(free -m | awk '/^Mem:/ {print $2}')
+    local proc_count=$(pgrep -c -f "exitmap" 2>/dev/null || echo 0)
+    log "Wave $wave ($phase): Memory ${mem_used}MB/${mem_total}MB, Processes: $proc_count"
+}
+
+# Get all exit fingerprints via temporary Tor bootstrap
+# Args: output_file
+get_all_fingerprints() {
+    local output_file=$1
+    
+    log "Bootstrapping Tor to get relay list..."
+    local temp_tor_dir="$TMP_DIR/exitmap_tor_temp"
+    local temp_log="$TMP_DIR/bootstrap_temp.log"
+    
+    prepare_tor_dir "$temp_tor_dir"
+    activate_venv
+    
+    # Quick bootstrap to get consensus
+    python3 -c "
+import stem.process
+import os
+import sys
+
+tor_dir = '$temp_tor_dir'
+os.makedirs(tor_dir, exist_ok=True)
+
+try:
+    tor_process = stem.process.launch_tor_with_config(
+        config={
+            'DataDirectory': tor_dir,
+            'ControlPort': 'auto',
+            'SocksPort': 'auto',
+        },
+        init_msg_handler=lambda line: print(line) if 'Bootstrapped' in line else None,
+        timeout=120,
+        take_ownership=True,
+    )
+    print('Tor bootstrapped successfully')
+    tor_process.kill()
+except Exception as e:
+    print(f'Bootstrap failed: {e}', file=sys.stderr)
+    sys.exit(1)
+" > "$temp_log" 2>&1
+    
+    if [ $? -ne 0 ]; then
+        log "Failed to bootstrap Tor for relay list"
+        cat "$temp_log"
+        cleanup_instance "$temp_tor_dir"
+        return 1
+    fi
+    
+    # Extract fingerprints to single file
+    python3 "$DEPLOY_DIR/scripts/get_exit_fingerprints.py" \
+        "$temp_tor_dir" \
+        --output "$output_file" \
+        $([[ "${ALL_EXITS:-true}" == "true" ]] && echo "--all-exits" || echo "")
+    
+    local result=$?
+    cleanup_instance "$temp_tor_dir"
+    
+    if [[ $result -ne 0 ]] || [[ ! -f "$output_file" ]]; then
+        log "Failed to extract fingerprints"
+        return 1
+    fi
+    
+    local count=$(wc -l < "$output_file")
+    log "Found $count exit relays"
+    return 0
+}
+
+# Run a single wave (all N instances scan the wave's fingerprints)
+# Args: wave_num total_waves wave_file instance_count
+# Returns: 0 on success, 1 on failure
+run_single_wave() {
+    local wave=$1
+    local total_waves=$2
+    local wave_file=$3
+    local n=$4
+    
+    local wave_relay_count=$(wc -l < "$wave_file")
+    log "=== Wave $wave/$total_waves ($wave_relay_count relays) ==="
+    log_wave_progress "$wave" "start"
+    
+    local wave_start=$(date +%s)
+    
+    # Start N instances for this wave
+    WAVE_INSTANCE_PIDS=()
+    WAVE_INSTANCE_ANALYSIS_DIRS=()
+    WAVE_INSTANCE_LOGS=()
+    
+    for i in $(seq 1 $n); do
+        local tor_dir="$TMP_DIR/exitmap_tor_w${wave}_$i"
+        local analysis_dir="${TMP_DIR}/analysis_${TIMESTAMP}_cv${i}_w${wave}"
+        local log_file="$TMP_DIR/exitmap_cv${i}_w${wave}.log"
+        
+        WAVE_INSTANCE_ANALYSIS_DIRS+=("$analysis_dir")
+        WAVE_INSTANCE_LOGS+=("$log_file")
+        
+        # Each instance scans the same wave file (all instances = cross-validation)
+        (run_instance "cv${i}_w${wave}" "$tor_dir" "$analysis_dir" "$log_file" "$wave_file") &
+        WAVE_INSTANCE_PIDS+=($!)
+        
+        # Stagger starts
+        [[ $i -lt $n ]] && sleep "$INSTANCE_STAGGER_DELAY"
+    done
+    
+    log "Wave $wave: Started $n instances (PIDs: ${WAVE_INSTANCE_PIDS[*]})"
+    
+    # Wait for all instances in this wave
+    local any_success=false
+    for i in "${!WAVE_INSTANCE_PIDS[@]}"; do
+        local exit_code=0
+        wait "${WAVE_INSTANCE_PIDS[$i]}" || exit_code=$?
+        [[ $exit_code -eq 0 ]] && any_success=true
+    done
+    
+    # Merge instance logs into unified log
+    for log_file in "${WAVE_INSTANCE_LOGS[@]}"; do
+        if [[ -f "$log_file" ]]; then
+            cat "$log_file" >> "$UNIFIED_LOG"
+            rm -f "$log_file"
+        fi
+    done
+    
+    local wave_end=$(date +%s)
+    local wave_duration=$((wave_end - wave_start))
+    
+    log_wave_progress "$wave" "end"
+    log "Wave $wave completed in ${wave_duration}s"
+    
+    # Accumulate analysis dirs for final aggregation
+    ALL_WAVE_ANALYSIS_DIRS+=("${WAVE_INSTANCE_ANALYSIS_DIRS[@]}")
+    
+    # Record wave stats
+    echo "{\"wave\": $wave, \"relays\": $wave_relay_count, \"duration_sec\": $wave_duration, \"retries\": ${WAVE_RETRY_COUNT:-0}, \"batch_size\": $WAVE_BATCH_SIZE}" >> "$WAVE_STATS_FILE"
+    
+    $any_success
+}
+
+# Run a wave with retry logic
+# Args: wave_num total_waves wave_file instance_count
+run_wave_with_retry() {
+    local wave=$1
+    local total_waves=$2
+    local wave_file=$3
+    local n=$4
+    local max_retries=${WAVE_MAX_RETRIES:-2}
+    
+    WAVE_RETRY_COUNT=0
+    
+    while true; do
+        if run_single_wave "$wave" "$total_waves" "$wave_file" "$n"; then
+            return 0
+        fi
+        
+        ((WAVE_RETRY_COUNT++))
+        if [[ $WAVE_RETRY_COUNT -ge $max_retries ]]; then
+            log "Wave $wave failed after $WAVE_RETRY_COUNT retries"
+            return 1
+        fi
+        
+        log "Wave $wave failed, retry $WAVE_RETRY_COUNT/$max_retries in 10s..."
+        sleep 10
+    done
+}
+
+# Wave-based cross-validation mode
+# Args: instance_count
+run_cross_validate_waves() {
+    local n=$1
+    
+    log "=== Wave-Based Cross-Validation Mode ==="
+    log "Instances: $n, Batch size: $WAVE_BATCH_SIZE relays/wave"
+    
+    # Get all fingerprints
+    local fps_all="/tmp/exitmap_fps_all_${TIMESTAMP}"
+    if ! get_all_fingerprints "$fps_all"; then
+        log "Failed to get relay fingerprints"
+        return 1
+    fi
+    
+    local total_relays=$(wc -l < "$fps_all")
+    local total_waves=$(( (total_relays + WAVE_BATCH_SIZE - 1) / WAVE_BATCH_SIZE ))
+    
+    log "Processing $total_relays relays in $total_waves waves of $WAVE_BATCH_SIZE"
+    
+    # Initialize wave stats file
+    WAVE_STATS_FILE="$TMP_DIR/wave_stats_${TIMESTAMP}.jsonl"
+    > "$WAVE_STATS_FILE"
+    
+    # Initialize global array for all analysis directories
+    ALL_WAVE_ANALYSIS_DIRS=()
+    
+    local waves_succeeded=0
+    local waves_failed=0
+    
+    # Process each wave
+    for wave in $(seq 1 $total_waves); do
+        local start_line=$(( (wave - 1) * WAVE_BATCH_SIZE + 1 ))
+        local end_line=$(( wave * WAVE_BATCH_SIZE ))
+        
+        # Extract this wave's fingerprints
+        local wave_file="/tmp/exitmap_fps_wave${wave}_${TIMESTAMP}"
+        sed -n "${start_line},${end_line}p" "$fps_all" > "$wave_file"
+        
+        if run_wave_with_retry "$wave" "$total_waves" "$wave_file" "$n"; then
+            ((waves_succeeded++))
+        else
+            ((waves_failed++))
+        fi
+        
+        # Clean up wave file
+        rm -f "$wave_file"
+    done
+    
+    # Clean up fingerprints file
+    rm -f "$fps_all"
+    
+    log "=== Wave Summary ==="
+    log "Waves succeeded: $waves_succeeded/$total_waves"
+    [[ $waves_failed -gt 0 ]] && log "Waves failed: $waves_failed"
+    
+    # Aggregate all results with cross-validation
+    if [[ ${#ALL_WAVE_ANALYSIS_DIRS[@]} -gt 0 ]]; then
+        aggregate_results "$OUTPUT_DIR" --cross-validate --wave-stats "$WAVE_STATS_FILE" "${ALL_WAVE_ANALYSIS_DIRS[@]}"
+        do_uploads
+    else
+        log "No results to aggregate"
+        return 1
+    fi
+    
+    [[ $waves_succeeded -gt 0 ]]
+}
+
 # Mode: Cross-validation (N instances scan ALL relays)
 run_cross_validate() {
     local n=$INSTANCE_COUNT
     log "=== Cross-Validation Mode ($n instances) ==="
     log "Each instance scans ALL relays. Relay passes if ANY instance succeeds."
     
+    # Use wave-based mode if WAVE_BATCH_SIZE > 0
+    if [[ "${WAVE_BATCH_SIZE:-0}" -gt 0 ]]; then
+        run_cross_validate_waves "$n"
+        return $?
+    fi
+    
+    # Original all-at-once mode
     start_parallel_instances "cv" "$n" false
     local any_success=false
     wait_parallel_instances "CV-" && any_success=true
