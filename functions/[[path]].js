@@ -3,11 +3,15 @@
  * Serves JSON/archive files from DO Spaces (primary) with R2 fallback.
  * Static assets (HTML/CSS/JS) pass through to Pages.
  * 
- * Adapted from aroivalidator-deploy for exitmap DNS health validation.
+ * API Endpoints:
+ *   /api/status         - Health check
+ *   /api/summary        - Metadata summary from latest.json
+ *   /api/failures       - Failed relays only
+ *   /latest/<fp>        - Results for specific fingerprint
  */
 
 // Cache TTLs in seconds
-const TTL = { latest: 60, historical: 31536000, default: 300 };
+const TTL = { latest: 60, historical: 31536000, default: 300, api: 60 };
 
 // Security: Pattern to detect traversal attempts (encoded or raw)
 const UNSAFE_PATH = /(?:^|\/)\.\.(?:\/|$)|%2e|%00|\x00/i;
@@ -58,15 +62,30 @@ const makeResponse = (body, path, source, ttl) => {
   });
 };
 
-const jsonResponse = (data, status, ttl = 0) => {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: {
-      'Content-Type': 'application/json; charset=utf-8',
-      'Cache-Control': ttl > 0 ? `public, max-age=${ttl}` : 'no-cache',
-      ...securityHeaders(),
-    },
-  });
+const jsonResponse = (data, status, ttl = 0) => new Response(JSON.stringify(data), {
+  status,
+  headers: {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': ttl > 0 ? `public, max-age=${ttl}` : 'no-cache',
+    ...securityHeaders(),
+  },
+});
+
+// Fetch and parse latest.json from backends (DO Spaces or R2)
+const fetchLatestData = async (env) => {
+  const order = (env.STORAGE_ORDER || 'do,r2').split(',').map(s => s.trim());
+  for (const backend of order) {
+    try {
+      if (backend === 'do' && env.DO_SPACES_URL) {
+        const res = await fetch(`${env.DO_SPACES_URL.replace(/\/$/, '')}/latest.json`);
+        if (res.ok) return { data: await res.json(), source: 'digitalocean-spaces' };
+      } else if (backend === 'r2' && env.EXITMAP_BUCKET) {
+        const obj = await env.EXITMAP_BUCKET.get('latest.json');
+        if (obj) return { data: await obj.json(), source: 'cloudflare-r2' };
+      }
+    } catch { /* continue to next backend */ }
+  }
+  return null;
 };
 
 const fetchDO = async (env, path, ttl) => {
@@ -100,7 +119,45 @@ export async function onRequest({ request, env, params, next, waitUntil }) {
       status: 'ok', 
       timestamp: new Date().toISOString(),
       service: 'exitmap-dns-health'
-    }, 200, 60);
+    }, 200, TTL.api);
+  }
+
+  // API: /api/summary - returns metadata from latest.json
+  if (rawPath === '/api/summary') {
+    const result = await fetchLatestData(env);
+    if (!result) return jsonResponse({ error: 'Data unavailable' }, 503, 10);
+    const { metadata = {} } = result.data;
+    return jsonResponse({ metadata, source: result.source }, 200, TTL.api);
+  }
+
+  // API: /api/failures - returns only failed relays from latest.json
+  if (rawPath === '/api/failures') {
+    const result = await fetchLatestData(env);
+    if (!result) return jsonResponse({ error: 'Data unavailable' }, 503, 10);
+    const { metadata = {}, results = [] } = result.data;
+    const failures = results.filter(r => r.status !== 'success');
+    return jsonResponse({
+      timestamp: metadata.timestamp,
+      total_failures: failures.length,
+      failures,
+      source: result.source
+    }, 200, TTL.api);
+  }
+
+  // API: /latest/<fingerprint> - returns result for specific relay
+  const fpMatch = rawPath.match(/^\/latest\/([A-Fa-f0-9]{40})$/);
+  if (fpMatch) {
+    const fingerprint = fpMatch[1].toUpperCase();
+    const result = await fetchLatestData(env);
+    if (!result) return jsonResponse({ error: 'Data unavailable' }, 503, 10);
+    const { metadata = {}, results = [] } = result.data;
+    const relay = results.find(r => (r.exit_fingerprint || '').toUpperCase() === fingerprint);
+    if (!relay) return jsonResponse({ error: 'Relay not found', fingerprint }, 404, TTL.api);
+    return jsonResponse({
+      timestamp: metadata.timestamp,
+      relay,
+      source: result.source
+    }, 200, TTL.api);
   }
 
   // Get clean path from params

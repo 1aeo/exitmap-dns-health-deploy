@@ -687,7 +687,22 @@
                     <li class="api-item">
                         <span class="api-method">GET</span>
                         <a href="/latest.json" class="api-path">/latest.json</a>
-                        <span class="api-desc">Latest scan results</span>
+                        <span class="api-desc">Latest scan results (full data)</span>
+                    </li>
+                    <li class="api-item">
+                        <span class="api-method">GET</span>
+                        <a href="/api/summary" class="api-path">/api/summary</a>
+                        <span class="api-desc">Metadata summary only</span>
+                    </li>
+                    <li class="api-item">
+                        <span class="api-method">GET</span>
+                        <a href="/api/failures" class="api-path">/api/failures</a>
+                        <span class="api-desc">Failed relays only</span>
+                    </li>
+                    <li class="api-item">
+                        <span class="api-method">GET</span>
+                        <span class="api-path">/latest/{fingerprint}</span>
+                        <span class="api-desc">Results for specific relay (40 hex chars)</span>
                     </li>
                     <li class="api-item">
                         <span class="api-method">GET</span>
