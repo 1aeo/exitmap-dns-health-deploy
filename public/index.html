@@ -687,12 +687,32 @@
                     <li class="api-item">
                         <span class="api-method">GET</span>
                         <a href="/latest.json" class="api-path">/latest.json</a>
-                        <span class="api-desc">Latest scan results</span>
+                        <span class="api-desc">Full latest scan results (metadata + all relays)</span>
+                    </li>
+                    <li class="api-item">
+                        <span class="api-method">GET</span>
+                        <span class="api-path">/latest/{fingerprint}</span>
+                        <span class="api-desc">Latest result for a specific relay (40 hex chars)</span>
+                    </li>
+                    <li class="api-item">
+                        <span class="api-method">GET</span>
+                        <a href="/api/stats" class="api-path">/api/stats</a>
+                        <span class="api-desc">Summary metadata and statistics only</span>
+                    </li>
+                    <li class="api-item">
+                        <span class="api-method">GET</span>
+                        <a href="/api/failures" class="api-path">/api/failures</a>
+                        <span class="api-desc">All failed relay results</span>
+                    </li>
+                    <li class="api-item">
+                        <span class="api-method">GET</span>
+                        <a href="/api/relays" class="api-path">/api/relays</a>
+                        <span class="api-desc">List of all relays with status</span>
                     </li>
                     <li class="api-item">
                         <span class="api-method">GET</span>
                         <a href="/files.json" class="api-path">/files.json</a>
-                        <span class="api-desc">Index of all available reports</span>
+                        <span class="api-desc">Index of all available historical reports</span>
                     </li>
                     <li class="api-item">
                         <span class="api-method">GET</span>
