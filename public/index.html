@@ -398,6 +398,31 @@
             white-space: nowrap;
         }
 
+        /* Shared pagination controls (used by failures table + file list) */
+        .pagination-controls {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 1rem;
+            padding: 0.75rem 0;
+            flex-wrap: wrap;
+        }
+
+        .pagination-info {
+            color: var(--aeo-green);
+            font-size: 0.85rem;
+        }
+
+        .pagination-range {
+            color: var(--aeo-text-dim);
+            font-size: 0.8rem;
+        }
+
+        .page-btn:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+
         .api-list {
             list-style: none;
         }

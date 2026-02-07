@@ -3,6 +3,11 @@
  * Extracted from index.html for CSP compliance (no unsafe-inline)
  */
 
+// Failures table state
+const failuresPerPage = 25;
+let allFailures = [];
+const getTorMetricsUrl = (fp) => fp ? `https://metrics.1aeo.com/relay/${fp}/` : '#';
+
 // All circuit failure type keys (for extracting from metadata)
 const CIRCUIT_FAILURE_TYPES = [
     'circuit_timeout', 'circuit_destroyed', 'circuit_channel_closed',
@@ -237,57 +242,23 @@ async function loadStats() {
         
         // Compute failures from results (no longer stored in separate array)
         const results = data.results || [];
-        const failures = results.filter(r => r.status !== 'success');
+        allFailures = results.filter(r => r.status !== 'success');
         
-        // Failed relays section (connected, not separate)
-        if (failures.length > 0) {
-            // Generate tor_metrics_url from fingerprint
-            const getTorMetricsUrl = (fp) => fp ? `https://metrics.1aeo.com/relay/${fp}/` : '#';
-            
+        // Failed relays section with pagination
+        if (allFailures.length > 0) {
             html += `
                 <div class="subsection-header" style="border-top: 1px solid var(--aeo-border-solid); padding-top: 1rem; margin-top: 0;">
                     <span class="subsection-title">⚠️ Failed Relays</span>
-                    <span class="subsection-count">${failures.length} relays</span>
+                    <span class="subsection-count">${allFailures.length} relays</span>
                 </div>
-                <table class="failures-table">
-                    <thead>
-                        <tr>
-                            <th>Nickname</th>
-                            <th>Fingerprint</th>
-                            <th>Status</th>
-                            <th>Error</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-            `;
-            
-            const displayFailures = failures.slice(0, 50);
-            html += displayFailures.map(f => `
-                <tr>
-                    <td><strong>${escapeHtml(f.exit_nickname || 'Unknown')}</strong></td>
-                    <td class="fingerprint"><a href="${getTorMetricsUrl(f.exit_fingerprint)}" target="_blank" rel="noopener">${f.exit_fingerprint || ''}</a></td>
-                    <td><span class="status-badge ${f.status || 'error'}">${f.status || 'error'}</span></td>
-                    <td style="color: var(--aeo-text-muted); font-size: 0.8rem;" title="${escapeHtml(f.error || '')}">${escapeHtml((f.error || '').slice(0, 120))}${(f.error || '').length > 120 ? '...' : ''}</td>
-                </tr>
-            `).join('');
-            
-            if (failures.length > 50) {
-                html += `
-                    <tr>
-                        <td colspan="4" style="text-align: center; color: var(--aeo-text-dim); padding: 1rem;">
-                            ... and ${failures.length - 50} more failures
-                        </td>
-                    </tr>
-                `;
-            }
-            
-            html += `
-                    </tbody>
-                </table>
+                <div id="failures-table-container"></div>
             `;
         }
         
         contentEl.innerHTML = html;
+        
+        // Render first page of failures table (after DOM is set)
+        if (allFailures.length > 0) displayFailuresPage(0);
         
     } catch (err) {
         contentEl.innerHTML = `
@@ -329,6 +300,57 @@ function formatTimestamp(isoString) {
     } catch (e) {
         return isoString;
     }
+}
+
+// Shared: pagination controls HTML (prev/next + page info)
+function paginationControls(page, totalPages, totalItems, perPage) {
+    if (totalPages <= 1) return '';
+    const start = page * perPage;
+    return `
+        <div class="pagination-controls">
+            <button class="button page-btn" data-page="${page - 1}" ${page === 0 ? 'disabled' : ''}>← Prev</button>
+            <span class="pagination-info">Page ${page + 1} of ${totalPages} <span class="pagination-range">(${start + 1}\u2013${Math.min(start + perPage, totalItems)} of ${totalItems})</span></span>
+            <button class="button page-btn" data-page="${page + 1}" ${page === totalPages - 1 ? 'disabled' : ''}>Next →</button>
+        </div>`;
+}
+
+// Shared: bind click handlers to .page-btn elements within a container
+function bindPageButtons(container, callback) {
+    container.querySelectorAll('.page-btn').forEach(btn => {
+        btn.addEventListener('click', function() {
+            if (!this.disabled) callback(parseInt(this.dataset.page, 10));
+        });
+    });
+}
+
+// Display a page of the failures table
+function displayFailuresPage(page) {
+    const container = document.getElementById('failures-table-container');
+    if (!container || allFailures.length === 0) return;
+
+    const totalPages = Math.ceil(allFailures.length / failuresPerPage);
+    page = Math.max(0, Math.min(page | 0, totalPages - 1));
+    const start = page * failuresPerPage;
+
+    container.innerHTML = `
+        <table class="failures-table">
+            <thead><tr><th>Nickname</th><th>Fingerprint</th><th>Status</th><th>Error</th></tr></thead>
+            <tbody>${allFailures.slice(start, start + failuresPerPage).map(f => {
+                const err = f.error || '';
+                return `<tr>
+                    <td><strong>${escapeHtml(f.exit_nickname || 'Unknown')}</strong></td>
+                    <td class="fingerprint"><a href="${getTorMetricsUrl(f.exit_fingerprint)}" target="_blank" rel="noopener">${f.exit_fingerprint || ''}</a></td>
+                    <td><span class="status-badge ${f.status || 'error'}">${f.status || 'error'}</span></td>
+                    <td style="color: var(--aeo-text-muted); font-size: 0.8rem;" title="${escapeHtml(err)}">${escapeHtml(err.slice(0, 120))}${err.length > 120 ? '...' : ''}</td>
+                </tr>`;
+            }).join('')}</tbody>
+        </table>
+        ${paginationControls(page, totalPages, allFailures.length, failuresPerPage)}`;
+
+    bindPageButtons(container, p => {
+        displayFailuresPage(p);
+        container.previousElementSibling?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
 }
 
 // Pagination state for file list
@@ -414,26 +436,14 @@ function displayPage(page) {
             </li>`;
     }).join('');
     
-    // Pagination controls - use data attributes instead of onclick
+    // Pagination controls (reuses shared helpers)
     const pagination = totalPages > 1 ? `
         <li class="file-item" style="margin-top: 1rem; border-color: var(--aeo-green); justify-content: center;">
-            <div style="display: flex; gap: 1rem; align-items: center; flex-wrap: wrap;">
-                <button class="button pagination-btn" data-page="${page - 1}" ${page === 0 ? 'disabled style="opacity: 0.5; cursor: not-allowed;"' : ''}>← Previous</button>
-                <span style="color: var(--aeo-green);">Page ${page + 1} of ${totalPages} (${allFiles.length} total)</span>
-                <button class="button pagination-btn" data-page="${page + 1}" ${page === totalPages - 1 ? 'disabled style="opacity: 0.5; cursor: not-allowed;"' : ''}>Next →</button>
-            </div>
+            ${paginationControls(page, totalPages, allFiles.length, filesPerPage)}
         </li>` : '';
     
     fileList.innerHTML = html + pagination;
-    
-    // Attach event listeners to pagination buttons
-    fileList.querySelectorAll('.pagination-btn').forEach(btn => {
-        btn.addEventListener('click', function() {
-            if (!this.disabled) {
-                displayPage(parseInt(this.dataset.page, 10));
-            }
-        });
-    });
+    bindPageButtons(fileList, displayPage);
 }
 
 // Initialize when DOM is ready
