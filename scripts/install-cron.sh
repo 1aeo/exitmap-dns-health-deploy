@@ -32,7 +32,7 @@ set +a
 DEPLOY_PATH=$(eval echo "$DEPLOY_PATH")
 
 # Default schedule if not set
-CRON_SCHEDULE="${CRON_SCHEDULE:-15 */2 * * *}"
+CRON_SCHEDULE="${CRON_SCHEDULE:-5 */12 * * *}"
 # Remove quotes if present
 CRON_SCHEDULE="${CRON_SCHEDULE//\"/}"
 
@@ -44,7 +44,7 @@ echo "Deploy path: $DEPLOY_PATH"
 echo "Schedule: $CRON_SCHEDULE"
 echo ""
 echo "Cron entry to install:"
-echo "$CRON_MARKER - DNS validation every 2 hours with 4 cross-validation instances"
+echo "$CRON_MARKER - DNS validation every 12 hours with 4-instance cross-validation"
 echo "$CRON_ENTRY"
 echo ""
 
@@ -68,7 +68,7 @@ fi
 
 # Add new entry
 NEW_CRON="$NEW_CRON
-$CRON_MARKER - DNS validation every 2 hours with 4 cross-validation instances
+$CRON_MARKER - DNS validation every 12 hours with 4-instance cross-validation
 $CRON_ENTRY"
 
 # Remove leading/trailing blank lines and install

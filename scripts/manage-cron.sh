@@ -5,7 +5,7 @@
 #   ./scripts/manage_cron.sh [install|remove|status]
 #
 # Configuration:
-#   Set CRON_SCHEDULE in config.env (default: "0 */6 * * *" = every 6 hours)
+#   Set CRON_SCHEDULE in config.env (default: "5 */12 * * *" = every 12 hours)
 
 set -euo pipefail
 
@@ -19,7 +19,7 @@ if [[ -f "$DEPLOY_DIR/config.env" ]]; then
 fi
 
 LOG_DIR="${LOG_DIR:-$EXITMAP_DIR/logs}"
-CRON_SCHEDULE="${CRON_SCHEDULE:-0 */6 * * *}"
+CRON_SCHEDULE="${CRON_SCHEDULE:-5 */12 * * *}"
 CRON_MARKER="# exitmap-dnshealth"
 
 # Use run_with_retry.sh for robustness
