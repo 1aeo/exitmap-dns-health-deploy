@@ -1,0 +1,38 @@
+diff --git a/functions/_shared.js b/functions/_shared.js
+index 0ed8984..0bb6d15 100644
+--- a/functions/_shared.js
++++ b/functions/_shared.js
+@@ -79,6 +79,10 @@ export function getExtension(path) {
+  * @returns {string} MIME type
+  */
+ export function getMimeType(path) {
++  // Prometheus metrics endpoint (no file extension)
++  if (path === 'metrics' || path.endsWith('/metrics')) {
++    return 'text/plain; version=0.0.4; charset=utf-8';
++  }
+   return MIME_TYPES[getExtension(path)] || 'application/octet-stream';
+ }
+ 
+diff --git a/scripts/allium-deploy-update.sh b/scripts/allium-deploy-update.sh
+index 07360bd..d96f0d5 100755
+--- a/scripts/allium-deploy-update.sh
++++ b/scripts/allium-deploy-update.sh
+@@ -61,6 +61,18 @@ purge_cdn() {
+         -H "Content-Type: application/json" \
+         -d '{"urls": ["search-index.json"]}' >/dev/null 2>&1 || true
+     
++    # Purge Prometheus metrics (must be fresh for scraping)
++    log "   Purging Prometheus metrics..."
++    local purge_response purge_http_code
++    purge_response=$(curl -s -w "\n%{http_code}" -X POST "${site_url}/_purge" \
++        -H "X-Purge-Secret: ${purge_secret}" \
++        -H "Content-Type: application/json" \
++        -d '{"urls": ["/metrics"]}' 2>&1)
++    purge_http_code=$(echo "$purge_response" | tail -1)
++    if [[ "$purge_http_code" != "200" ]]; then
++        log "   ⚠️  Prometheus metrics purge returned HTTP $purge_http_code"
++    fi
++    
+     # Find all HTML files and convert to URL paths
+     # Cache keys use directory form (foo/) not file form (foo/index.html)
+     local html_files=()
