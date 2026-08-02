@@ -106,11 +106,12 @@ EOF
 
 log_success "Generated: $WRANGLER_FILE"
 
-# Prepare static directory (index.html + app.js - JSON served from storage)
+# Prepare static directory (frontend + search sitemap; JSON served from storage)
 STATIC_DIR="$DEPLOY_DIR/pages-static"
 mkdir -p "$STATIC_DIR"
 cp -f "$DEPLOY_DIR/public/index.html" "$STATIC_DIR/"
 cp -f "$DEPLOY_DIR/public/app.js" "$STATIC_DIR/"
+cp -f "$DEPLOY_DIR/public/sitemap.xml" "$STATIC_DIR/"
 
 # Copy functions
 mkdir -p "$STATIC_DIR/../functions"
