@@ -28,7 +28,7 @@ err() { log_error "$1"; exit 1; }
     echo "  STORAGE_ORDER          - Backend order: do,r2 or r2,do (default: do,r2)"
     echo "  R2_BUCKET              - R2 bucket name"
     echo "  DO_SPACES_BUCKET       - DO Spaces bucket name"
-    echo "  CUSTOM_DOMAIN          - Custom domain (e.g., exitdns.1aeo.com)"
+    echo "  CUSTOM_DOMAIN          - Custom domain (e.g., exitdnshealth.1aeo.com)"
     exit 0
 }
 
@@ -106,11 +106,12 @@ EOF
 
 log_success "Generated: $WRANGLER_FILE"
 
-# Prepare static directory (index.html + app.js - JSON served from storage)
+# Prepare static directory (frontend + search sitemap; JSON served from storage)
 STATIC_DIR="$DEPLOY_DIR/pages-static"
 mkdir -p "$STATIC_DIR"
 cp -f "$DEPLOY_DIR/public/index.html" "$STATIC_DIR/"
 cp -f "$DEPLOY_DIR/public/app.js" "$STATIC_DIR/"
+cp -f "$DEPLOY_DIR/public/sitemap.xml" "$STATIC_DIR/"
 
 # Copy functions
 mkdir -p "$STATIC_DIR/../functions"
