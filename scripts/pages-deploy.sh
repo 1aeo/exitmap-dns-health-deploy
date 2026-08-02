@@ -28,7 +28,7 @@ err() { log_error "$1"; exit 1; }
     echo "  STORAGE_ORDER          - Backend order: do,r2 or r2,do (default: do,r2)"
     echo "  R2_BUCKET              - R2 bucket name"
     echo "  DO_SPACES_BUCKET       - DO Spaces bucket name"
-    echo "  CUSTOM_DOMAIN          - Custom domain (e.g., exitdns.1aeo.com)"
+    echo "  CUSTOM_DOMAIN          - Custom domain (e.g., exitdnshealth.1aeo.com)"
     exit 0
 }
 

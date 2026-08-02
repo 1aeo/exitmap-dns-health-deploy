@@ -2,7 +2,7 @@
 
 Deployment automation for Tor exit relay DNS health validation.
 
-**Live:** https://exitdns.1aeo.com (or https://exitmap-dns.pages.dev)  
+**Live:** https://exitdnshealth.1aeo.com (or https://exitmap-dns.pages.dev)
 **Code:** https://github.com/1aeo/exitmap
 
 ---
