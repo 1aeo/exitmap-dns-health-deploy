@@ -17,13 +17,17 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'scripts'))
 
+import ipaddress
 import resolver_stats
-from resolver_stats import add_resolver_stats, asn_provider, graphql_rows, load_previous
+from resolver_stats import add_resolver_stats, graphql_rows, load_previous, origin_asns, published_ranges
 
 FP_A, FP_B, FP_C, FP_D = ("AAAAAAAA" + "1" * 32, "BBBBBBBB" + "2" * 32,
                           "CCCCCCCC" + "3" * 32, "DDDDDDDD" + "4" * 32)
-PROVIDERS = {"8.8.8.8": "google", "2001:4860::1": "google", "192.0.2.10": "other",
-             "172.64.0.1": "cloudflare", "1.1.1.1": "cloudflare"}
+RANGES = {"google": [ipaddress.ip_network("8.8.8.0/24"), ipaddress.ip_network("2001:4860::/32")],
+          "cloudflare": [ipaddress.ip_network("172.64.0.0/13"), ipaddress.ip_network("203.0.113.0/24")],
+          "ffmuc": [ipaddress.ip_network("5.1.66.0/24")]}
+ORIGINS = {"192.0.2.10": {64500}, "192.0.2.99": {64500}, "203.0.113.5": {64501},
+           "74.63.16.1": {42}, "35.192.0.1": {396982}}  # anything else: lookup failed
 
 
 def row(name, ip, sample=10):
@@ -32,10 +36,10 @@ def row(name, ip, sample=10):
 
 def make_report(timestamp="2026-10-11T19:26:08.878754Z"):
     return {"metadata": {"timestamp": timestamp}, "results": [
-        {"exit_fingerprint": FP_A, "status": "success", "timestamp": 1791745519.8},
-        {"exit_fingerprint": FP_B, "status": "success", "timestamp": 1791746524.9},
-        {"exit_fingerprint": FP_C, "status": "timeout", "timestamp": 1791746000.0},
-        {"exit_fingerprint": FP_D, "status": "success", "timestamp": 1791746100.0},
+        {"exit_fingerprint": FP_A, "status": "success", "timestamp": 1791745519.8, "exit_address": "203.0.113.5"},
+        {"exit_fingerprint": FP_B, "status": "success", "timestamp": 1791746524.9, "exit_address": "203.0.113.6"},
+        {"exit_fingerprint": FP_C, "status": "timeout", "timestamp": 1791746000.0, "exit_address": "203.0.113.7"},
+        {"exit_fingerprint": FP_D, "status": "success", "timestamp": 1791746100.0, "exit_address": "192.0.2.99"},
     ]}
 
 
@@ -45,17 +49,16 @@ ROWS = [
     row("aaaaaaaa.tor.exit.validator.1aeo.com", "2001:4860::1"),    # qname-minimised
     row("U2.AAAAAAAA.Tor.Exit.Validator.1aeo.com.", "192.0.2.10"),  # mixed case, trailing dot
     row("u3.bbbbbbbb.tor.exit.validator.1aeo.com", "172.64.0.1"),
-    row("u4.bbbbbbbb.tor.exit.validator.1aeo.com", "198.51.100.1"),  # ASN lookup fails
-    row("u5.dddddddd.tor.exit.validator.1aeo.com", "192.0.2.10", sample=1),
+    row("u4.bbbbbbbb.tor.exit.validator.1aeo.com", "198.51.100.1"),  # AS lookup fails
+    row("u5.dddddddd.tor.exit.validator.1aeo.com", "192.0.2.10", sample=1),  # D's own network
     row("chk-x.tor.exit.validator.1aeo.com", "1.1.1.1"),              # not an exit
     row("www.1aeo.com", "8.8.8.8"),                                   # not the validator zone
 ]
 WEIGHTS = {FP_A: 0.3, FP_B: 0.1, FP_D: 0.6}
 
 
-def run(report, rows=ROWS, previous=None, weights=WEIGHTS):
-    return add_resolver_stats(report, rows, previous, lookup=lambda ip: PROVIDERS.get(ip, "unknown"),
-                              weights=weights)
+def run(report, rows=ROWS, previous=None, weights=WEIGHTS, origins=ORIGINS):
+    return add_resolver_stats(report, rows, previous, ranges=RANGES, origin=origins.get, weights=weights)
 
 
 class TestResolverStats(unittest.TestCase):
@@ -70,17 +73,20 @@ class TestResolverStats(unittest.TestCase):
         self.assertEqual(b["resolver"], {"primary": None, "public": None,
                                          "queries": {"cloudflare": 10, "unknown": 10}})
         self.assertNotIn("resolver", c)
-        self.assertEqual(d["resolver"]["queries"], {"other": 1})
+        self.assertEqual(d["resolver"]["queries"], {"local": 1})
         self.assertEqual((s["rows"], s["est_queries"]), (8, 71))  # www.1aeo.com excluded, chk- counted
 
     def test_weighted_summary(self):
         s = run(make_report())
         # A: 0.3 * 30/40 google; B: 0.1 * 10/10 cloudflare ("unknown" excluded); D below "seen"
         self.assertEqual(s["public_share_pct"],
-                         {"google": 56.25, "cloudflare": 25.0, "quad9": 0.0, "opendns": 0.0, "all": 81.25})
+                         {"google": 56.25, "cloudflare": 25.0, "quad9": 0.0, "opendns": 0.0, "ffmuc": 0.0,
+                          "all": 81.25})
         self.assertEqual((s["exits_total"], s["exits_covered"], s["exits_labelled"], s["exits_using_public"]),
                          (3, 2, 1, 1))
         self.assertTrue(s["weighted"])
+        self.assertEqual(s["share_pct"], {"google": 56.25, "cloudflare": 25.0, "quad9": 0.0, "opendns": 0.0,
+                                          "ffmuc": 0.0, "local": 0.0, "other": 18.75})
         self.assertEqual(s["window"], {"start": "2026-10-11T19:00:19Z", "end": "2026-10-11T19:27:04Z"})
 
     def test_unweighted_fallback(self):
@@ -101,7 +107,7 @@ class TestResolverStats(unittest.TestCase):
         a, b, c, d = report["results"]
         self.assertEqual(a["resolver"]["queries"], {"google": 30, "other": 10, "quad9": 10.0})
         self.assertEqual(c["resolver"]["queries"], {"google": 4.0})  # carried without new rows
-        self.assertEqual(d["resolver"], {"primary": "other", "public": False, "queries": {"other": 26.0}})
+        self.assertEqual(d["resolver"], {"primary": "other", "public": False, "queries": {"local": 1, "other": 25.0}})
         self.assertEqual((s["exits_covered"], s["exits_labelled"], s["exits_using_public"]), (3, 2, 1))
 
     def test_no_rows_raises_and_leaves_report(self):
@@ -110,23 +116,87 @@ class TestResolverStats(unittest.TestCase):
             run(report, rows=[row("www.1aeo.com", "8.8.8.8")])
         self.assertEqual(report, make_report())
 
-    def test_load_previous_skips_current_and_reports_without_data(self):
+    def test_load_previous_only_strictly_older_reports(self):
         with tempfile.TemporaryDirectory() as d:
-            def write(name, with_data):
-                rep = make_report()
+            def write(name, ts, with_data):
+                rep = make_report(timestamp=ts)
                 if with_data:
                     rep["metadata"]["resolvers"] = {"version": 1, "name": name}
                 with open(os.path.join(d, name), "w") as f:
                     json.dump(rep, f)
                 return os.path.join(d, name)
-            write("dns_health_2026-10-10_12-05-01.json", True)
-            write("dns_health_2026-10-11_00-05-01.json", True)
-            write("dns_health_2026-10-11_12-05-01.json", False)  # stats failed that run
-            latest = write("latest.json", False)
-            current = write("dns_health_2026-10-12_00-05-01.json", True)
-            prev = load_previous(latest, current)
-            self.assertEqual(prev["metadata"]["resolvers"]["name"], "dns_health_2026-10-11_00-05-01.json")
-            self.assertIsNone(load_previous(None, current))
+            write("dns_health_2026-10-10_12-05-01.json", "2026-10-10T19:26:00Z", True)
+            write("dns_health_2026-10-11_00-05-01.json", "2026-10-11T07:26:00Z", True)
+            write("dns_health_2026-10-11_12-05-01.json", "2026-10-11T19:26:00Z", False)  # stats failed
+            current = write("dns_health_2026-10-12_00-05-01.json", "2026-10-12T07:26:00Z", True)
+            write("dns_health_2026-10-12_12-05-01.json", "2026-10-12T19:26:00Z", True)  # newer: ignored
+            # re-run case: latest.json is a copy of the current report -> not "previous"
+            latest = write("latest.json", "2026-10-12T07:26:00Z", True)
+            prev = load_previous(latest, current, resolver_stats.epoch("2026-10-12T07:26:00Z"))
+            self.assertEqual([p["metadata"]["resolvers"]["name"] for p in prev],
+                             ["dns_health_2026-10-11_00-05-01.json", "dns_health_2026-10-10_12-05-01.json"])
+            self.assertEqual(load_previous(None, current, 0), [])
+
+    def test_exit_missing_from_newest_previous_is_carried_from_older(self):
+        older = make_report(timestamp="2026-10-04T19:26:08Z")       # 7 days = 2 half-lives
+        older["metadata"]["resolvers"] = {"version": 1}
+        older["results"][2]["resolver"] = {"queries": {"google": 400}}
+        newer = make_report(timestamp="2026-10-11T07:26:08Z")
+        newer["metadata"]["resolvers"] = {"version": 1}
+        del newer["results"][2]                                       # exit C missing from that scan
+        report = make_report()
+        run(report, previous=[newer, older])
+        self.assertEqual(report["results"][2]["resolver"]["queries"], {"google": 100.0})
+
+    def test_previous_not_older_raises(self):
+        same = make_report()
+        same["metadata"]["resolvers"] = {"version": 1}
+        report = make_report()
+        with self.assertRaises(RuntimeError):
+            run(report, previous=same)
+        self.assertEqual(report, make_report())
+
+    def test_stale_providers_expire_and_public_follows_primary(self):
+        # one stray google row plus the exit's own resolver; afterwards only its own resolver
+        rows0 = [row("u.aaaaaaaa.tor.exit.validator.1aeo.com", "8.8.8.8")] + \
+                [row("u.aaaaaaaa.tor.exit.validator.1aeo.com", "192.0.2.10")] * 5
+        rows_n = [row("u.aaaaaaaa.tor.exit.validator.1aeo.com", "192.0.2.10")] * 2
+        prev = None
+        for i in range(60):                                           # 30 days of 12-hourly scans
+            report = make_report(timestamp=resolver_stats.iso(1791745568 + i * 43200))
+            run(report, rows=rows0 if i == 0 else rows_n, previous=prev)
+            a = report["results"][0]["resolver"]
+            if i == 0:
+                self.assertEqual(a, {"primary": "other", "public": False, "queries": {"google": 10, "other": 50}})
+            prev = report
+        self.assertNotIn("google", a["queries"])                     # decayed below one query and purged
+        self.assertEqual((a["primary"], a["public"]), ("other", False))
+        self.assertEqual(report["metadata"]["resolvers"]["exits_using_public"], 0)
+
+    def test_lookup_outage_aborts_without_touching_report(self):
+        report = make_report()
+        rows = [row("u.aaaaaaaa.tor.exit.validator.1aeo.com", "192.0.2.10")] * 3 + \
+               [row("u.bbbbbbbb.tor.exit.validator.1aeo.com", "8.8.8.8")]  # list-matched: needs no AS lookup
+        with self.assertRaises(RuntimeError):
+            run(report, rows=rows, origins={})                  # 30 of 40 estimated queries unknown
+        self.assertEqual(report, make_report())
+        run(report, rows=rows[2:], origins={})                  # 10 of 20 unknown: at the limit, still published
+        self.assertEqual(report["results"][0]["resolver"]["queries"], {"unknown": 10})
+
+    def test_classification_rules(self):
+        rows = [row("u.aaaaaaaa.tor.exit.validator.1aeo.com", ip) for ip in
+                ("2001:4860:1::5", "172.70.1.1", "74.63.16.1", "35.192.0.1")] + \
+               [row("u.dddddddd.tor.exit.validator.1aeo.com", ip) for ip in ("192.0.2.10", "35.192.0.1")] + \
+               [row("u.bbbbbbbb.tor.exit.validator.1aeo.com", ip) for ip in ("5.1.66.3", "203.0.113.6")]
+        report = make_report()
+        run(report, rows=rows)
+        a, d = report["results"][0], report["results"][3]
+        # published Google/Cloudflare ranges; Quad9 by PCH/WoodyNet origin AS; a Google Cloud
+        # (AS396982) address outside Google's egress list is NOT google
+        self.assertEqual(a["resolver"]["queries"], {"cloudflare": 10, "google": 10, "other": 10, "quad9": 10})
+        self.assertEqual(d["resolver"]["queries"], {"local": 10, "other": 10})
+        # Freifunk Muenchen's published range; the exit's own address is local even if inside a range
+        self.assertEqual(report["results"][1]["resolver"]["queries"], {"ffmuc": 10, "local": 10})
 
 
 class TestGraphqlPaging(unittest.TestCase):
@@ -154,6 +224,12 @@ class TestGraphqlPaging(unittest.TestCase):
         self.assertEqual([r["queryName"] for r in rows], [r["queryName"] for r in data])
         self.assertTrue(all(c["queryName_like"] == "%.x" for c in calls))
 
+    def test_bad_token_rejected_without_echo(self):
+        with mock.patch.dict(os.environ, {"CF_ZONE_ID": "zone", "CF_ANALYTICS_TOKEN": "\u201csecret-value\u201d"}):
+            with self.assertRaises(RuntimeError) as ctx:
+                graphql_rows("2026-10-11T19:10:00Z", "2026-10-11T19:10:09Z", "x")
+        self.assertNotIn("secret-value", str(ctx.exception))
+
     def test_graphql_errors_raise(self):
         err = io.BytesIO(json.dumps({"data": None, "errors": [{"message": "bad"}]}).encode())
         with mock.patch.object(resolver_stats.urllib.request, "urlopen", return_value=err), \
@@ -162,34 +238,55 @@ class TestGraphqlPaging(unittest.TestCase):
                 graphql_rows("2026-10-11T19:10:00Z", "2026-10-11T19:10:09Z", "x")
 
 
-class TestAsnProvider(unittest.TestCase):
+class TestLookups(unittest.TestCase):
 
-    def lookup(self, ip, answer):
+    def origin(self, ip, *answers):
         queried = []
 
         def resolve(name, rdtype, lifetime=None):
             queried.append(name)
-            if answer is None:
+            if not answers:
                 raise OSError("timeout")
-            return [types.SimpleNamespace(to_text=lambda: '"%s | 1.2.3.0/24 | US | arin |"' % answer)]
+            return [types.SimpleNamespace(to_text=lambda a=a: '"%s | US | arin |"' % a) for a in answers]
         fake = types.ModuleType("dns")
         fake.resolver = types.SimpleNamespace(resolve=resolve)
         with mock.patch.dict(sys.modules, {"dns": fake, "dns.resolver": fake.resolver}):
-            return asn_provider(ip), queried
+            return origin_asns(ip), queried
 
-    def test_ipv4_google(self):
-        self.assertEqual(self.lookup("8.8.4.4", "15169"), ("google", ["4.4.8.8.origin.asn.cymru.com"]))
+    def test_ipv4_query_name(self):
+        self.assertEqual(self.origin("8.8.4.4", "15169 | 8.8.4.0/24"), ({15169}, ["4.4.8.8.origin.asn.cymru.com"]))
 
-    def test_ipv6_cloudflare_shortened_address(self):
-        provider, (name,) = self.lookup("2a06:98c1:53::", "13335")
-        self.assertEqual(provider, "cloudflare")
+    def test_ipv6_query_name_for_shortened_address(self):
+        asns, (name,) = self.origin("2a06:98c1:53::", "13335 | 2a06:98c0::/29")
+        self.assertEqual(asns, {13335})
         self.assertTrue(name.endswith(".1.c.8.9.6.0.a.2.origin6.asn.cymru.com"))
         self.assertEqual(len(name.split(".")), 32 + 4)
 
-    def test_other_multi_origin_and_failure(self):
-        self.assertEqual(self.lookup("192.0.2.1", "64500")[0], "other")
-        self.assertEqual(self.lookup("192.0.2.1", "64500 19281")[0], "quad9")
-        self.assertEqual(self.lookup("192.0.2.1", None)[0], "unknown")
+    def test_most_specific_prefix_wins_and_failure_is_none(self):
+        self.assertEqual(self.origin("192.0.2.1", "64500 | 192.0.0.0/16", "42 715 | 192.0.2.0/24")[0], {42, 715})
+        self.assertEqual(self.origin("192.0.2.1", "42 | 192.0.2.0/24", "64500 | 192.0.0.0/16")[0], {42})
+        self.assertIsNone(self.origin("192.0.2.1")[0])
+
+    def test_published_ranges_and_fallbacks(self):
+        google = {"prefixes": [{"ipv4Prefix": f"34.64.{i}.0/24", "service": "Google Public DNS"} for i in range(150)]
+                              + [{"ipv6Prefix": "2001:4860:4860::/48", "service": "Google Public DNS"}]}
+        cloudflare = {"result": {"ipv4_cidrs": ["172.64.0.0/13"], "ipv6_cidrs": ["2400:cb00::/32"]}}
+
+        def ok(url, timeout=None):
+            return io.BytesIO(json.dumps(google if "gstatic" in url else cloudflare).encode())
+        with mock.patch.object(resolver_stats.urllib.request, "urlopen", ok):
+            r = published_ranges()
+        self.assertEqual((len(r["google"]), [str(n) for n in r["cloudflare"]]), (151, ["172.64.0.0/13", "2400:cb00::/32"]))
+
+        def down(url, timeout=None):
+            raise OSError("unreachable")
+        txt = [types.SimpleNamespace(strings=[f"34.64.{i}.0/24 icn ".encode() for i in range(120)])]
+        fake = types.ModuleType("dns")
+        fake.resolver = types.SimpleNamespace(resolve=lambda name, rdtype, lifetime=None: txt)
+        with mock.patch.object(resolver_stats.urllib.request, "urlopen", down), \
+             mock.patch.dict(sys.modules, {"dns": fake, "dns.resolver": fake.resolver}):
+            r = published_ranges()                       # Google from the TXT record, Cloudflare snapshot
+        self.assertEqual((len(r["google"]), len(r["cloudflare"])), (120, len(resolver_stats.CLOUDFLARE_SNAPSHOT)))
 
 
 if __name__ == "__main__":
