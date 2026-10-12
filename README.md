@@ -70,6 +70,10 @@ sudo ./scripts/install.sh --caddy
 | Every 6h    | Run DNS validation, upload to cloud |
 | Monthly 1st | Compress data >180 days old      |
 
+**Resolver stats (optional):** with `CF_ANALYTICS_TOKEN` and `CF_ZONE_ID` set, each scan pulls the validator
+zone's sampled Cloudflare DNS analytics and adds per-exit `resolver` estimates plus `metadata.resolvers`
+(public resolver share) to the report via `scripts/resolver_stats.py`. Failures only log "Resolver stats skipped".
+
 ---
 
 ## Commands

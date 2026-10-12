@@ -239,7 +239,22 @@ async function loadStats() {
             timing.total,
             '⏱️'
         );
-        
+
+        // Public DNS resolver share (sampled Cloudflare DNS analytics, exit-probability weighted)
+        const rs = meta.resolvers;
+        if (rs && rs.public_share_pct) {
+            const pct = (v) => `${(Number(v) || 0).toFixed(1)}%`;
+            const items = [['Google', 'google'], ['Cloudflare', 'cloudflare'], ['Quad9', 'quad9'], ['OpenDNS', 'opendns']]
+                .map(([label, key]) => [label, pct(rs.public_share_pct[key])]);
+            items.push(['Exits covered', pct(rs.exits_total ? 100 * rs.exits_covered / rs.exits_total : 0)]);
+            html += `
+                <div class="details-row">
+                    <div class="detail-item"><span class="detail-label" style="color: var(--aeo-green); cursor: help;" title="Share of exit DNS lookups (weighted by exit probability) sent via large public resolvers, measured at our authoritative DNS during this scan.">🌐 Public DNS resolvers:</span></div>
+                    ${items.map(([lbl, v]) => `<div class="detail-item"><span class="detail-label">${lbl}:</span> <span class="detail-value">${v}</span></div>`).join('')}
+                </div>
+            `;
+        }
+
         // Compute failures from results (no longer stored in separate array)
         const results = data.results || [];
         allFailures = results.filter(r => r.status !== 'success');
