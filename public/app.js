@@ -18,6 +18,7 @@ const CIRCUIT_FAILURE_TYPES = [
     'circuit_guard_limit', 'circuit_failed'
 ];
 
+// Load latest.json and render the summary panel (counts, configuration, timing, resolvers, failures)
 async function loadStats() {
     const contentEl = document.getElementById('results-content');
     const timestampEl = document.getElementById('scan-timestamp');
@@ -239,7 +240,22 @@ async function loadStats() {
             timing.total,
             '⏱️'
         );
-        
+
+        // Public DNS resolver share (sampled Cloudflare DNS analytics, exit-probability weighted)
+        const rs = meta.resolvers;
+        if (rs && rs.public_share_pct) {
+            const pct = (v) => `${(Number(v) || 0).toFixed(1)}%`;
+            const items = [['Google', 'google'], ['Cloudflare', 'cloudflare'], ['Quad9', 'quad9'], ['OpenDNS', 'opendns'], ['Freifunk München', 'ffmuc']]
+                .map(([label, key]) => [label, pct(rs.public_share_pct[key])]);
+            items.push(['Exits covered', pct(rs.exits_total ? 100 * rs.exits_covered / rs.exits_total : 0)]);
+            html += `
+                <div class="details-row">
+                    <div class="detail-item"><span class="detail-label" style="color: var(--aeo-green); cursor: help;" title="Estimated share of exit DNS lookups (weighted by exit probability) sent via public resolver services, from sampled queries at our authoritative DNS over recent scans (3.5-day half-life).">🌐 Public DNS resolvers:</span></div>
+                    ${items.map(([lbl, v]) => `<div class="detail-item"><span class="detail-label">${lbl}:</span> <span class="detail-value">${v}</span></div>`).join('')}
+                </div>
+            `;
+        }
+
         // Compute failures from results (no longer stored in separate array)
         const results = data.results || [];
         allFailures = results.filter(r => r.status !== 'success');

@@ -651,6 +651,12 @@ aggregate_results() {
     
     if $aggregate_cmd --quiet; then
         log "Aggregation complete"
+        if [[ -n "${CF_ANALYTICS_TOKEN:-}" && -n "${CF_ZONE_ID:-}" ]]; then  # resolver stats (non-fatal)
+            sleep "${RESOLVER_STATS_DELAY:-300}"  # Cloudflare analytics rows lag a few minutes
+            ( activate_venv && CF_ANALYTICS_TOKEN="$CF_ANALYTICS_TOKEN" CF_ZONE_ID="$CF_ZONE_ID" \
+                python3 "$DEPLOY_DIR/scripts/resolver_stats.py" "$report_file" "$latest_report" ) >> "$UNIFIED_LOG" 2>&1 \
+                || log "Resolver stats skipped"
+        fi
         finalize_report "$output_dir" "$report_file" "$latest_report"
         return 0
     else
