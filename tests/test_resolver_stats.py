@@ -13,6 +13,7 @@ import sys
 import tempfile
 import types
 import unittest
+import urllib.error
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'scripts'))
@@ -321,9 +322,10 @@ class TestGraphqlPaging(unittest.TestCase):
             threading.Thread(target=srv.serve_forever, daemon=True).start()
         try:
             with mock.patch.object(resolver_stats, "GRAPHQL", f"http://127.0.0.1:{origin.server_port}/graphql"), \
-                 mock.patch.dict(os.environ, {"CF_ZONE_ID": "zone", "CF_ANALYTICS_TOKEN": "tok"}):
-                with self.assertRaises(Exception):
-                    graphql_rows("2026-10-11T19:10:00Z", "2026-10-11T19:10:09Z", "x")
+                 mock.patch.dict(os.environ, {"CF_ZONE_ID": "zone", "CF_ANALYTICS_TOKEN": "tok"}), \
+                 self.assertRaises(urllib.error.HTTPError) as ctx:
+                graphql_rows("2026-10-11T19:10:00Z", "2026-10-11T19:10:09Z", "x")
+            self.assertEqual(ctx.exception.code, 302)        # the 3xx itself surfaces, nothing followed
         finally:
             target.shutdown()
             origin.shutdown()
