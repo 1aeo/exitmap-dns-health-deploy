@@ -74,6 +74,17 @@ LOOKBACK = 10        # earlier reports searched for an exit's carried counts
 MAX_UNKNOWN = 0.5    # abort if resolver lookups fail for more than this share of new queries
 
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse redirects, so the Authorization header never follows a 3xx to another URL."""
+
+    def redirect_request(self, *args, **kwargs):
+        """Returning None makes urllib raise HTTPError for the 3xx instead of following it."""
+        return None
+
+
+GRAPHQL_OPENER = urllib.request.build_opener(NoRedirect)
+
+
 def epoch(iso):
     """ISO-8601 UTC timestamp ("...Z" or "+00:00") -> epoch seconds."""
     return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
@@ -96,10 +107,11 @@ def graphql_rows(start, end, suffix):
         body = json.dumps({"query": QUERY, "variables": {"z": os.environ["CF_ZONE_ID"], "f": flt}}).encode()
         req = urllib.request.Request(GRAPHQL, body, {"Authorization": "Bearer " + token,
                                                      "Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=120) as resp:
+        with GRAPHQL_OPENER.open(req, timeout=120) as resp:
             data = json.load(resp)
-        if data.get("errors"):
-            raise RuntimeError(f"GraphQL error: {data['errors']}")
+        if data.get("errors"):  # log the messages only, not the full error objects
+            raise RuntimeError("GraphQL error: " + "; ".join(
+                str(e.get("message", "?") if isinstance(e, dict) else e)[:200] for e in data["errors"]))
         return data["data"]["viewer"]["zones"][0]["dnsAnalyticsAdaptive"]
     rows, window = [], {"datetime_geq": start}
     while True:

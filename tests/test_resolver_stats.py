@@ -246,7 +246,7 @@ class TestGraphqlPaging(unittest.TestCase):
             return io.BytesIO(json.dumps(out).encode())
 
         with mock.patch.object(resolver_stats, "PAGE_SIZE", 3), \
-             mock.patch.object(resolver_stats.urllib.request, "urlopen", fake_urlopen), \
+             mock.patch.object(resolver_stats, "GRAPHQL_OPENER", types.SimpleNamespace(open=fake_urlopen)), \
              mock.patch.dict(os.environ, {"CF_ZONE_ID": "zone", "CF_ANALYTICS_TOKEN": "tok"}):
             rows = graphql_rows("2026-10-11T19:10:00Z", "2026-10-11T19:10:09Z", "x")
         self.assertEqual([r["queryName"] for r in rows], [r["queryName"] for r in data])
@@ -269,18 +269,65 @@ class TestGraphqlPaging(unittest.TestCase):
             out = {"data": {"viewer": {"zones": [{"dnsAnalyticsAdaptive": data[:resolver_stats.PAGE_SIZE]}]}}}
             return io.BytesIO(json.dumps(out).encode())
         with mock.patch.object(resolver_stats, "PAGE_SIZE", 3), \
-             mock.patch.object(resolver_stats.urllib.request, "urlopen", fake_urlopen), \
+             mock.patch.object(resolver_stats, "GRAPHQL_OPENER", types.SimpleNamespace(open=fake_urlopen)), \
              mock.patch.dict(os.environ, {"CF_ZONE_ID": "zone", "CF_ANALYTICS_TOKEN": "tok"}):
             with self.assertRaises(RuntimeError):
                 graphql_rows("2026-10-11T19:10:00Z", "2026-10-11T19:10:09Z", "x")
 
     def test_graphql_errors_raise(self):
         """GraphQL errors raise instead of returning partial data."""
-        err = io.BytesIO(json.dumps({"data": None, "errors": [{"message": "bad"}]}).encode())
-        with mock.patch.object(resolver_stats.urllib.request, "urlopen", return_value=err), \
+        err = io.BytesIO(json.dumps({"data": None, "errors": [
+            {"message": "bad filter", "path": ["viewer"], "extensions": {"zoneTag": "secret-zone"}}]}).encode())
+        with mock.patch.object(resolver_stats, "GRAPHQL_OPENER", mock.Mock(open=mock.Mock(return_value=err))), \
              mock.patch.dict(os.environ, {"CF_ZONE_ID": "zone", "CF_ANALYTICS_TOKEN": "tok"}):
-            with self.assertRaises(RuntimeError):
+            with self.assertRaises(RuntimeError) as ctx:
                 graphql_rows("2026-10-11T19:10:00Z", "2026-10-11T19:10:09Z", "x")
+        self.assertEqual(str(ctx.exception), "GraphQL error: bad filter")  # message only, no error objects
+
+    def test_redirect_is_refused_and_token_not_forwarded(self):
+        """A 3xx from the GraphQL endpoint fails; the redirect target never sees the token."""
+        import http.server
+        import threading
+        seen = []
+
+        class Target(http.server.BaseHTTPRequestHandler):
+            """Records the Authorization header of any request it receives."""
+            def do_POST(self):
+                """Record and answer."""
+                seen.append(self.headers.get("Authorization"))
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'{"data": {"viewer": {"zones": [{"dnsAnalyticsAdaptive": []}]}}}')
+            do_GET = do_POST
+
+            def log_message(self, *args):
+                """Quiet."""
+
+        target = http.server.HTTPServer(("127.0.0.1", 0), Target)
+
+        class Redirect(http.server.BaseHTTPRequestHandler):
+            """Answers every POST with a 302 to the target server."""
+            def do_POST(self):
+                """Redirect."""
+                self.send_response(302)
+                self.send_header("Location", f"http://127.0.0.1:{target.server_port}/steal")
+                self.end_headers()
+
+            def log_message(self, *args):
+                """Quiet."""
+
+        origin = http.server.HTTPServer(("127.0.0.1", 0), Redirect)
+        for srv in (target, origin):
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            with mock.patch.object(resolver_stats, "GRAPHQL", f"http://127.0.0.1:{origin.server_port}/graphql"), \
+                 mock.patch.dict(os.environ, {"CF_ZONE_ID": "zone", "CF_ANALYTICS_TOKEN": "tok"}):
+                with self.assertRaises(Exception):
+                    graphql_rows("2026-10-11T19:10:00Z", "2026-10-11T19:10:09Z", "x")
+        finally:
+            target.shutdown()
+            origin.shutdown()
+        self.assertEqual(seen, [])
 
 
 class TestLookups(unittest.TestCase):
