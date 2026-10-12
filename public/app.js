@@ -18,6 +18,7 @@ const CIRCUIT_FAILURE_TYPES = [
     'circuit_guard_limit', 'circuit_failed'
 ];
 
+// Load latest.json and render the summary panel (counts, configuration, timing, resolvers, failures)
 async function loadStats() {
     const contentEl = document.getElementById('results-content');
     const timestampEl = document.getElementById('scan-timestamp');

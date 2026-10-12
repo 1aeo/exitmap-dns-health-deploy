@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 # the operator itself publishes about the addresses its resolver queries authoritative servers
 # from (sources checked 2026-10-12). Otherwise the resolver is "local" (same origin AS as the
 # exit's address: the operator's or its hoster's resolver), "other", or "unknown" (no AS data).
+# Every category counts toward the shares: they all describe resolvers the exits really used.
 #
 # google: Google's egress list, not Google's ASNs (AS15169/AS396982 also carry Google Cloud VMs,
 #   e.g. an exit's own resolver). Public DNS FAQ, https://developers.google.com/speed/public-dns/faq#locations :
@@ -58,7 +59,7 @@ PUBLIC_ASNS = {
     36692: "opendns",
 }
 PROVIDERS = ("google", "cloudflare", "quad9", "opendns", "ffmuc")
-CATEGORIES = PROVIDERS + ("local", "other")
+CATEGORIES = PROVIDERS + ("local", "other", "unknown")
 ONIONOO = ("https://onionoo.torproject.org/details?type=relay&running=true&flag=Exit"
            "&fields=fingerprint,exit_probability")
 GRAPHQL = "https://api.cloudflare.com/client/v4/graphql"
@@ -74,10 +75,12 @@ MAX_UNKNOWN = 0.5    # abort if resolver lookups fail for more than this share o
 
 
 def epoch(iso):
+    """ISO-8601 UTC timestamp ("...Z" or "+00:00") -> epoch seconds."""
     return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
 
 
 def iso(ts):
+    """Epoch seconds -> ISO-8601 UTC timestamp in the GraphQL filter format."""
     return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -88,6 +91,7 @@ def graphql_rows(start, end, suffix):
         raise RuntimeError("CF_ANALYTICS_TOKEN contains invalid characters (value not shown)")
 
     def page(window):
+        """One GraphQL request for the window; at most PAGE_SIZE rows, oldest first."""
         flt = {"datetime_leq": end, "queryName_like": "%." + suffix, **window}
         body = json.dumps({"query": QUERY, "variables": {"z": os.environ["CF_ZONE_ID"], "f": flt}}).encode()
         req = urllib.request.Request(GRAPHQL, body, {"Authorization": "Bearer " + token,
@@ -103,7 +107,10 @@ def graphql_rows(start, end, suffix):
         if len(batch) < PAGE_SIZE:
             return rows + batch
         last = batch[-1]["datetime"]  # re-read the boundary second whole: no dropped or repeated rows
-        rows += [r for r in batch if r["datetime"] != last] + page({"datetime_geq": last, "datetime_leq": last})
+        boundary = page({"datetime_geq": last, "datetime_leq": last})
+        if len(boundary) >= PAGE_SIZE:
+            raise RuntimeError(f"{PAGE_SIZE}+ sampled rows at {last}; cannot page without losing rows")
+        rows += [r for r in batch if r["datetime"] != last] + boundary
         window = {"datetime_gt": last}
 
 
@@ -124,6 +131,7 @@ def origin_asns(ip):
 def published_ranges():
     """{provider: [ip_network]} from Google's and Cloudflare's published egress lists."""
     def get(url):
+        """GET a JSON document."""
         with urllib.request.urlopen(url, timeout=60) as resp:
             return json.load(resp)
     try:
@@ -144,6 +152,7 @@ def published_ranges():
 
 
 def exit_probabilities():
+    """{fingerprint: exit_probability} for running exits from Onionoo, or {} if unavailable."""
     try:
         with urllib.request.urlopen(ONIONOO, timeout=60) as resp:
             return {r["fingerprint"]: r.get("exit_probability") or 0.0 for r in json.load(resp)["relays"]}
@@ -177,11 +186,15 @@ def load_previous(path, current_path, current_ts, limit=LOOKBACK):
 
 
 def scan_window(report):
+    """(start, end) of the scan: first/last result timestamp padded by WINDOW_PAD."""
     ts = [r["timestamp"] for r in report["results"] if r.get("timestamp")]
     return iso(min(ts) - WINDOW_PAD), iso(max(ts) + WINDOW_PAD)
 
 
 def add_resolver_stats(report, rows, previous=None, ranges=None, origin=origin_asns, weights=None):
+    """Add results[].resolver and metadata.resolvers to report from this scan's sampled rows plus
+    decayed counts from previous (a report or a newest-first list). Raises, leaving report
+    unchanged, when there is nothing to publish or the data looks broken."""
     results = report["results"]
     suffix = "." + os.environ.get("DNS_WILDCARD_DOMAIN", "tor.exit.validator.1aeo.com").lower().strip(".")
     by_fp8 = {}
@@ -214,6 +227,7 @@ def add_resolver_stats(report, rows, previous=None, ranges=None, origin=origin_a
             public[ip] = next((PUBLIC_ASNS[a] for a in sorted(asns[ip] or ()) if a in PUBLIC_ASNS), None)
 
     def category(fp, ip):
+        """Category of resolver ip for the exit with fingerprint fp."""
         if ip == exit_ip.get(fp):  # the exit's own address, even inside a provider's range (e.g. NAT)
             return "local"
         if public[ip]:
@@ -244,16 +258,16 @@ def add_resolver_stats(report, rows, previous=None, ranges=None, origin=origin_a
         q.update(new.get(r.get("exit_fingerprint"), {}))
         q = {k: round(v, 2) for k, v in sorted(q.items()) if v >= FLOOR}
         if q:
-            known = {k: v for k, v in q.items() if k != "unknown"}
-            primary = max(known, key=known.get) if sum(known.values()) >= LABEL else None
-            r["resolver"] = {"primary": primary, "public": primary in PROVIDERS if primary else None,
+            primary = max(q, key=q.get) if sum(q.values()) >= LABEL else None
+            r["resolver"] = {"primary": primary,
+                             "public": primary in PROVIDERS if primary not in (None, "unknown") else None,
                              "queries": q}
     weights = exit_probabilities() if weights is None else weights
     ok = [r for r in results if r.get("status") == "success"]
     share, wsum, seen, labelled, using_public = Counter(), 0.0, 0, 0, 0
     for r in ok:
-        known = {k: v for k, v in r.get("resolver", {}).get("queries", {}).items() if k != "unknown"}
-        total = sum(known.values())
+        used = r.get("resolver", {}).get("queries", {})
+        total = sum(used.values())
         if total < SEEN:
             continue
         seen += 1
@@ -261,7 +275,7 @@ def add_resolver_stats(report, rows, previous=None, ranges=None, origin=origin_a
         using_public += r["resolver"]["public"] is True
         w = weights.get(r.get("exit_fingerprint"), 0.0) if weights else 1.0
         wsum += w
-        for k, v in known.items():
+        for k, v in used.items():
             share[k] += w * v / total
     pct = {p: round(100 * share[p] / wsum, 2) if wsum else 0.0 for p in CATEGORIES}
     public_pct = {p: pct[p] for p in PROVIDERS}
@@ -276,11 +290,13 @@ def add_resolver_stats(report, rows, previous=None, ranges=None, origin=origin_a
         "classification": {"google": GOOGLE_RANGES, "cloudflare": CLOUDFLARE_RANGES,
                            "quad9": "AS42 AS715 AS1288 AS19281", "opendns": "AS36692",
                            "ffmuc": " ".join(FFMUC_RANGES),
-                           "local": "same origin AS as the exit address"}}
+                           "local": "the exit's own address or its origin AS",
+                           "unknown": "origin AS lookup failed"}}
     return report["metadata"]["resolvers"]
 
 
 def main(report_path, previous_path=None):
+    """Update REPORT_JSON in place (atomically) and print the summary."""
     with open(report_path) as f:
         report = json.load(f)
     start, end = scan_window(report)
