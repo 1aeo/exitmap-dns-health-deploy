@@ -461,6 +461,41 @@ class TestLocalTiers(unittest.TestCase):
             self.assertEqual(name(domain, SUFFIXES), "", domain)
         self.assertEqual(name("artikel10.org", frozenset()), "")
 
+    def test_idn_domain_and_punycode_ptr_compare_equal(self):
+        """A Unicode AROI domain and the punycode PTR of a resolver at its hoster give the same name."""
+        self.assertEqual(resolver_stats.operator_name("bücher.org", SUFFIXES), "xn--bcher-kva")
+        self.assertEqual(resolver_stats.registrable_label("xn--bcher-kva.in-berlin.de", SUFFIXES), "xn--bcher-kva")
+        self.assertEqual(resolver_stats.operator_name("bü.org", SUFFIXES), "")  # NAME_MIN counts "bü", not "xn--b-xka"
+        relays = [_relay(FP_A, ["198.51.100.10:9001"])]
+        report = _exit_report(FP_A, "198.51.100.10")
+        run(report, rows=[row("u.aaaaaaaa.tor.exit.validator.1aeo.com", "217.197.91.153")],
+            origins={"198.51.100.10": {60729}, "217.197.91.153": {29670}}, weights={}, relays=relays,
+            aroi=[{"fingerprint": FP_A, "valid": True, "domain": "Bücher.org"}],
+            fcrdns=lambda ip: {"xn--bcher-kva.in-berlin.de"})
+        self.assertEqual(report["results"][0]["resolver"]["queries"], {"local_operator": 10})
+
+    def test_local_operator_counts_carry_only_from_aroi_identity_reports(self):
+        """Earlier v2 reports (operators also from family/ContactInfo) do not carry local_operator."""
+        relays = [_relay(FP_A, ["198.51.100.10:9001"])]
+        origins = {"198.51.100.10": {60729}, "10.5.5.5": {77}}
+
+        def previous(identity):
+            """A report one half-life older with 100 local_operator and 40 local_24 queries for A."""
+            prev = _exit_report(FP_A, "198.51.100.10")
+            prev["metadata"]["timestamp"] = "2026-10-08T07:26:08Z"
+            prev["metadata"]["resolvers"] = {"version": 2}
+            if identity:
+                prev["metadata"]["resolvers"]["operator_identity"] = identity
+            prev["results"][0]["resolver"] = {"queries": {"local_operator": 100, "local_24": 40}}
+            return prev
+        for identity, expected in ((None, {"local_24": 20.0, "other": 10}),
+                                   ("aroi", {"local_24": 20.0, "local_operator": 50.0, "other": 10})):
+            report = _exit_report(FP_A, "198.51.100.10")
+            run(report, rows=[row("u.aaaaaaaa.tor.exit.validator.1aeo.com", "10.5.5.5")], previous=previous(identity),
+                origins=origins, weights={}, relays=relays)
+            self.assertEqual(report["results"][0]["resolver"]["queries"], expected, identity)
+            self.assertEqual(report["metadata"]["resolvers"]["operator_identity"], "aroi")
+
     def test_registrable_label_follows_the_public_suffix_algorithm(self):
         """Longest rule wins, wildcards and exceptions apply, unlisted TLDs use the default rule."""
         label = resolver_stats.registrable_label

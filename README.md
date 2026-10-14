@@ -91,7 +91,9 @@ generic word). Unlike the other three, this rule can be met by anyone who regist
 some public suffix. The list is cached in `data/` and fetched at most once a day; without it the
 name rule is off (`operator_sources.public_suffix_list` is false). If Onionoo or the AROI file is
 unreachable the step is skipped. `operator_signals` counts this scan's new estimated queries per
-matching rule (address, prefix, fcrdns, name; not decayed, not weighted). Sampled rows are archived locally under `data/resolver_rows/`
+matching rule (address, prefix, fcrdns, name; not decayed, not weighted). Reports made this way carry
+`operator_identity: "aroi"`; `local_operator` counts are carried forward only from such reports
+(earlier version-2 reports also used Tor family and ContactInfo). Sampled rows are archived locally under `data/resolver_rows/`
 (gitignored, not uploaded).
 
 ---

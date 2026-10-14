@@ -102,6 +102,7 @@ CATEGORIES = PROVIDERS + LOCAL_TIERS + ("other", "unknown")
 ONIONOO_URL = ("https://onionoo.torproject.org/details?type=relay&running=true"
                "&fields=fingerprint,or_addresses,exit_addresses,exit_probability")
 AROI_URL = "https://aroivalidator.1aeo.com/latest.json"
+OPERATOR_IDENTITY = "aroi"  # metadata marker: local_operator counts carried only from such reports
 GRAPHQL = "https://api.cloudflare.com/client/v4/graphql"
 QUERY = """query($z:String!,$f:ZoneDnsAnalyticsAdaptiveFilter_InputObject!){viewer{zones(filter:{zoneTag:$z}){
 dnsAnalyticsAdaptive(filter:$f,limit:10000,orderBy:[datetime_ASC]){datetime queryName sourceIP sampleInterval}}}}"""
@@ -395,14 +396,23 @@ def name_in_domain(name, domain):
     return bool(domain) and (name == domain or name.endswith("." + domain))
 
 
+def _punycode(name):
+    """A DNS name in ASCII (IDNA) form, as the suffix rules and PTR answers are; "" if invalid."""
+    name = (name or "").lower().strip(".")
+    try:
+        return name.encode("idna").decode("ascii")
+    except UnicodeError:
+        return name if name.isascii() else ""
+
+
 def registrable_label(name, suffixes):
     """The label a DNS name is registered under, per the Public Suffix List algorithm.
 
     artikel10.org -> artikel10, relays.example.co.uk -> example, artikel10.in-berlin.de ->
-    artikel10 (in-berlin.de is a public suffix). Empty when the name is itself a public suffix
-    or there are no rules (fail safe).
+    artikel10 (in-berlin.de is a public suffix), bücher.org -> xn--bcher-kva. Empty when the
+    name is itself a public suffix or there are no rules (fail safe).
     """
-    labels = (name or "").lower().strip(".").split(".")
+    labels = _punycode(name).split(".")
     if not suffixes or len(labels) < 2 or not all(labels):
         return ""
     size = 1  # the list's default rule "*": the last label is a public suffix
@@ -424,7 +434,11 @@ def operator_name(domain, suffixes):
     distinctive names can match, and when there are no suffix rules.
     """
     name = registrable_label(norm_domain(domain), suffixes)
-    if len(name) < NAME_MIN or name.isdigit() or name in GENERIC_NAMES:
+    try:
+        shown = name.encode("ascii").decode("idna")  # NAME_MIN etc. apply to the name as written
+    except UnicodeError:
+        shown = name
+    if len(shown) < NAME_MIN or shown.isdigit() or shown in GENERIC_NAMES:
         return ""
     return name
 
@@ -863,6 +877,9 @@ def add_resolver_stats(report, rows, previous=None, ranges=None, origin=origin_a
     previous = [prev for prev in previous if resolvers_version(prev) == 2]  # v1 "local" has no tiers
     previous.sort(key=lambda prev: epoch(prev["metadata"]["timestamp"]), reverse=True)
     for prev in previous:  # newest first: each exit is carried from the newest report that has it
+        # Earlier version-2 reports also took operators from Tor family and ContactInfo; their
+        # local_operator counts cannot be split, so they are not carried.
+        aroi_identity = prev["metadata"]["resolvers"].get("operator_identity") == OPERATOR_IDENTITY
         hours = (now - epoch(prev["metadata"]["timestamp"])) / 3600
         if hours <= 0:
             raise RuntimeError("previous report is not older than the current one")
@@ -871,7 +888,8 @@ def add_resolver_stats(report, rows, previous=None, ranges=None, origin=origin_a
             fp = prev_result.get("exit_fingerprint")
             if prev_result.get("resolver") and fp not in carried:
                 queries = prev_result["resolver"].get("queries") or {}
-                carried[fp] = {k: v * decay for k, v in queries.items() if k in CATEGORIES}
+                carried[fp] = {k: v * decay for k, v in queries.items() if k in CATEGORIES
+                               and (k != "local_operator" or aroi_identity)}
 
     updates = []
     for result in results:
@@ -920,6 +938,7 @@ def add_resolver_stats(report, rows, previous=None, ranges=None, origin=origin_a
         "thresholds": {"seen": SEEN, "label": LABEL}, "weighted": bool(weights),
         "exits_total": len(ok), "exits_covered": seen, "exits_labelled": labelled,
         "exits_using_public": using_public, "public_share_pct": public_pct, "share_pct": pct,
+        "operator_identity": OPERATOR_IDENTITY,
         "operator_sources": {"onionoo": True, "aroi": True, "public_suffix_list": bool(suffixes)},
         "operator_signals": {"address": signals["address"], "prefix": signals["prefix"],
                              "fcrdns": signals["fcrdns"], "name": signals["name"]},
