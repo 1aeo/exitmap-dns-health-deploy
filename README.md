@@ -72,7 +72,17 @@ sudo ./scripts/install.sh --caddy
 
 **Resolver stats (optional):** with `CF_ANALYTICS_TOKEN` and `CF_ZONE_ID` set, each scan pulls the validator
 zone's sampled Cloudflare DNS analytics and adds per-exit `resolver` estimates plus `metadata.resolvers`
-(public resolver share) to the report via `scripts/resolver_stats.py`. Failures only log "Resolver stats skipped".
+(version 2) via `scripts/resolver_stats.py`. Failures only log "Resolver stats skipped".
+
+Version 2 categories are the public providers `google`, `cloudflare`, `quad9`, `opendns` and `ffmuc`,
+then `local_24` (same IPv4 /24 or IPv6 /64 as the exit, including its own address), `local_22`
+(same IPv4 /22 or IPv6 /48, outside that tighter prefix), `local_as` (same origin AS, outside those
+prefixes), `local_operator` (same operator, outside the exit's prefix and AS), plus `other` and
+`unknown`. `local_operator` uses the Onionoo effective family, a validated AROI domain, and — only
+when that domain is missing — an identical ContactInfo string. `operator_signals` counts this
+scan's new estimated queries that matched by address, prefix, or forward-confirmed reverse DNS
+(not decayed, not weighted). Sampled rows are archived locally under `data/resolver_rows/`
+(gitignored, not uploaded).
 
 ---
 
@@ -128,6 +138,11 @@ tail -f logs/cron.log
 | latest.json, files.json   | 60s                |
 | dns_health_*.json         | 1 year (immutable) |
 | archives/*.tar.gz         | 1 year (immutable) |
+
+The Pages Function caches proxied JSON under a key that includes `CACHE_KEY_VERSION`
+(default `1`, set in `config.env` and written into the Pages vars by `pages-deploy.sh`).
+Bump it after rewriting historical `dns_health_*.json` files so edges fetch the new
+copies. `latest.json` and `files.json` expire in 60 seconds and do not need a bump.
 
 ---
 
