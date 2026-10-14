@@ -443,7 +443,9 @@ class TestLocalTiers(unittest.TestCase):
         self.assertEqual(resolver_stats.operator_name("relays.Zwiebelnet.ORG."), "zwiebelnet")
         self.assertEqual(resolver_stats.operator_name("www.applied-privacy.net"), "applied-privacy")
         self.assertEqual(resolver_stats.operator_name("torrelays.co.uk"), "torrelays")
-        for domain in ("dfri.se", "12345.net", "relay.net", "privacy.org", "localhost", "", None):
+        for domain in ("dfri.se", "12345.net", "relay.net", "privacy.org", "localhost", "", None,
+                       "relays.example.tokyo.jp", "x.warszawa.pl", "bundesgebaermutter.ddnss.eu",
+                       "someone.dyndns.org", "host.amazonaws.com"):
             self.assertEqual(resolver_stats.operator_name(domain), "", domain)
 
     def test_non_string_contact_and_aroi_domain_do_not_abort(self):
@@ -838,6 +840,47 @@ class TestLookups(unittest.TestCase):
             self.assertEqual(resolver_stats.fcrdns_names("217.197.91.153", set(), {"artikel10"}),
                              {"artikel10.in-berlin.de"})
         self.assertEqual(forward, ["artikel10.in-berlin.de"])
+
+    def test_at_most_one_forward_lookup_per_ip_matches_only_by_name(self):
+        """Attacker PTRs that merely contain an operator name cost one forward lookup, not FCRDNS_NAMES."""
+        forward = []
+
+        def resolve(name, rdtype, lifetime=None):
+            """Five label-only PTRs plus one under the operator domain."""
+            if rdtype == "PTR":
+                names = ["artikel10.s%d.attacker.test." % i for i in range(5)] + ["ns.artikel10.org."]
+                return [types.SimpleNamespace(to_text=lambda n=n: n) for n in names]
+            forward.append(name)
+            raise OSError("timeout")
+
+        fake = types.ModuleType("dns")
+        fake.resolver = types.SimpleNamespace(resolve=resolve)
+        with mock.patch.dict(sys.modules, {"dns": fake, "dns.resolver": fake.resolver}):
+            resolver_stats.fcrdns_names("192.0.2.50", {"artikel10.org"}, {"artikel10"})
+        self.assertEqual(forward, ["ns.artikel10.org", "artikel10.s0.attacker.test"])
+
+    def test_operator_name_reaches_reverse_dns_in_production_path(self):
+        """With fcrdns=None, add_resolver_stats passes operator names to the real reverse-DNS check."""
+        forward = []
+
+        def resolve(name, rdtype, lifetime=None):
+            """PTR artikel10.in-berlin.de, forward-confirmed."""
+            if rdtype == "PTR":
+                return [types.SimpleNamespace(to_text=lambda: "artikel10.in-berlin.de.")]
+            forward.append(name)
+            return [types.SimpleNamespace(to_text=lambda: "217.197.91.153")]
+
+        fake = types.ModuleType("dns")
+        fake.resolver = types.SimpleNamespace(resolve=resolve)
+        report = _exit_report(FP_A, "198.51.100.10")
+        with mock.patch.dict(sys.modules, {"dns": fake, "dns.resolver": fake.resolver}):
+            add_resolver_stats(report, [row("u.aaaaaaaa.tor.exit.validator.1aeo.com", "217.197.91.153")],
+                               None, ranges=RANGES, origin={"198.51.100.10": {60729}, "217.197.91.153": {29670}}.get,
+                               weights={}, relays=[_relay(FP_A, ["198.51.100.10:9001"])],
+                               aroi=[{"fingerprint": FP_A, "valid": True, "domain": "artikel10.org"}],
+                               aroi_available=True, fcrdns=None)
+        self.assertEqual(forward, ["artikel10.in-berlin.de"])
+        self.assertEqual(report["results"][0]["resolver"]["queries"], {"local_operator": 10})
 
     def test_fcrdns_forward_checks_only_candidate_names(self):
         """With domains, PTR names outside them are never forward-resolved; at most FCRDNS_NAMES are."""

@@ -110,7 +110,7 @@ LOOKBACK = 10        # earlier reports searched for an exit's carried counts
 MAX_UNKNOWN = 0.5    # abort if origin-AS lookups fail for more than this share (outage guard)
 FCRDNS_MAX = 2000    # reverse-DNS checks per run, resolver IPs with the most estimated queries first
 FCRDNS_BUDGET = 180  # seconds for all reverse-DNS checks; checks still running count as no match
-FCRDNS_NAMES = 4     # PTR names forward-checked per IP, only names under a candidate operator domain
+FCRDNS_NAMES = 4     # PTR names forward-checked per IP: under an operator domain, plus at most one by name
 _FETCH_ATTEMPTS = 3
 NAME_MIN = 5         # shortest operator name (from a validated AROI domain) matched inside a hostname
 GENERIC_NAMES = frozenset({  # words too common in hostnames to identify an operator
@@ -119,7 +119,10 @@ GENERIC_NAMES = frozenset({  # words too common in hostnames to identify an oper
     "online", "digital", "global", "secure", "security", "anonymous", "onion", "onions", "freedom",
     "email", "admin", "local", "static", "dynamic", "client", "customer", "dedicated", "example",
     "torproject", "github", "gitlab", "google", "cloudflare", "amazon", "microsoft", "public",
-    "service", "services", "infra", "gateway", "default"})
+    "service", "services", "infra", "gateway", "default",
+    # shared hosting / dynamic-DNS platforms whose name sits where an operator's would
+    "amazonaws", "dyndns", "no-ip", "noip", "ddnss", "duckdns", "dynv6", "blogspot", "codeberg",
+    "netlify", "vercel", "herokuapp", "pages", "gitbook"})
 _SECOND_LEVEL = frozenset({"co", "com", "net", "org", "ac", "gov", "edu", "ne", "or", "go"})
 _CONTACT_FIELD = re.compile(r"(?:^|\s)(url|email):(\S+)", re.IGNORECASE)
 
@@ -361,7 +364,12 @@ def operator_name(domain):
     labels = [label for label in norm_domain(domain).split(".") if label]
     if len(labels) < 2:
         return ""
-    if len(labels) >= 3 and labels[-2] in _SECOND_LEVEL and len(labels[-1]) == 2:
+    if len(labels) >= 3 and len(labels[-1]) == 2:
+        # ccTLD with more labels: only a known generic second level (example.co.uk) is
+        # trusted; anything else may be a multi-label public suffix (tokyo.jp, ddnss.eu),
+        # whose label would be a place or platform name, so no name at all (fail safe).
+        if labels[-2] not in _SECOND_LEVEL:
+            return ""
         name = labels[-3]
     else:
         name = labels[-2]
@@ -396,8 +404,11 @@ def fcrdns_names(ip, domains=None, names=None):
     rdtype = "A" if addr.version == 4 else "AAAA"
     candidates = sorted({ptr.to_text().rstrip(".").lower() for ptr in ptrs})
     if domains is not None or names is not None:
-        candidates = [name for name in candidates
-                      if any(name_in_domain(name, d) for d in domains or ()) or has_label(name, names)]
+        # Names under an operator domain first; at most one name that matches only by label,
+        # since such a name's forward lookup may go to anyone's (possibly slow) nameserver.
+        in_domain = [name for name in candidates if any(name_in_domain(name, d) for d in domains or ())]
+        by_label = [name for name in candidates if name not in in_domain and has_label(name, names)]
+        candidates = in_domain + by_label[:1]
     names = set()
     for name in candidates[:FCRDNS_NAMES]:
         try:

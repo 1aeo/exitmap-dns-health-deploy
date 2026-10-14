@@ -257,7 +257,7 @@ async function loadStats() {
             // Version 2: the exit's own resolvers by distance, then the rest
             const share = rs.share_pct || {};
             if (share.local_24 !== undefined) {
-                const local = [['/24', 'local_24'], ['/22', 'local_22'], ['AS', 'local_as'], ['Operator', 'local_operator'], ['Other', 'other'], ['Unknown', 'unknown']]
+                const local = [['/24', 'local_24'], ['/22', 'local_22'], ['AS', 'local_as'], ['Operator', 'local_operator'], ['Other (not local)', 'other'], ['Unknown network', 'unknown']]
                     .map(([label, key]) => [label, pct(share[key])]);
                 html += `
                 <div class="details-row">
