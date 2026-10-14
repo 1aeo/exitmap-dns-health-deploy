@@ -642,7 +642,7 @@ def _index_aroi(results):
         raw_domain = row.get("domain")
         if not isinstance(raw_domain, str):
             continue
-        domain = norm_domain(raw_domain)
+        domain = _punycode(norm_domain(raw_domain))  # one spelling per domain, as PTR answers use
         if fp and domain:
             domain_of[fp] = domain
             by_domain[domain].add(fp)

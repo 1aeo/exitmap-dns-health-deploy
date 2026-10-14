@@ -474,6 +474,21 @@ class TestLocalTiers(unittest.TestCase):
             fcrdns=lambda ip: {"xn--bcher-kva.in-berlin.de"})
         self.assertEqual(report["results"][0]["resolver"]["queries"], {"local_operator": 10})
 
+    def test_unicode_and_punycode_aroi_spellings_form_one_group(self):
+        """Relays validated as bücher.org and xn--bcher-kva.org are one operator; PTRs match either spelling."""
+        relays = [_relay(FP_A, ["198.51.100.10:9001"]), _relay(FP_B, ["10.5.5.5:9001"])]
+        aroi = [{"fingerprint": FP_A, "valid": True, "domain": "bücher.org"},
+                {"fingerprint": FP_B, "valid": True, "domain": "XN--BCHER-KVA.org"}]
+        origins = {"198.51.100.10": {50}, "10.5.5.5": {77}, "10.9.9.9": {78}}
+        report = _exit_report(FP_A, "198.51.100.10")
+        run(report, rows=[row("u.aaaaaaaa.tor.exit.validator.1aeo.com", "10.5.5.5"),
+                          row("v.aaaaaaaa.tor.exit.validator.1aeo.com", "10.9.9.9")],
+            origins=origins, weights={}, relays=relays, aroi=aroi,
+            fcrdns=lambda ip: {"ns.xn--bcher-kva.org"} if ip == "10.9.9.9" else set())
+        self.assertEqual(report["results"][0]["resolver"]["queries"], {"local_operator": 20})
+        self.assertEqual(report["metadata"]["resolvers"]["operator_signals"],
+                         {"address": 10, "prefix": 0, "fcrdns": 10, "name": 0})
+
     def test_local_operator_counts_carry_only_from_aroi_identity_reports(self):
         """Earlier v2 reports (operators also from family/ContactInfo) do not carry local_operator."""
         relays = [_relay(FP_A, ["198.51.100.10:9001"])]
