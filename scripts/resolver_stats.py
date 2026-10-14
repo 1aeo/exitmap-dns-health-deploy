@@ -22,7 +22,7 @@ origin-AS lookup failed.
 
 import glob, gzip, ipaddress, json, os, re, sys, time, urllib.parse, urllib.request
 from collections import Counter, defaultdict
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 
 # Public resolver services. A query counts for one only when its source IP is covered by what
@@ -103,7 +103,10 @@ HALF_LIFE_H = 84     # carry-forward half-life (3.5 days)
 SEEN, LABEL = 5, 25  # decayed estimated queries to count an exit as seen / to label it
 FLOOR = 1            # drop a category once its decayed estimate falls below one query
 LOOKBACK = 10        # earlier reports searched for an exit's carried counts
-MAX_UNKNOWN = 0.5    # abort if resolver lookups fail for more than this share of new queries
+MAX_UNKNOWN = 0.5    # abort if origin-AS lookups fail for more than this share (outage guard)
+FCRDNS_MAX = 2000    # reverse-DNS checks per run, resolver IPs with the most estimated queries first
+FCRDNS_BUDGET = 180  # seconds for all reverse-DNS checks; checks still running count as no match
+FCRDNS_NAMES = 4     # PTR names forward-checked per IP, only names under a candidate operator domain
 _FETCH_ATTEMPTS = 3
 _CONTACT_FIELD = re.compile(r"(?:^|\s)(url|email):(\S+)", re.IGNORECASE)
 
@@ -318,7 +321,10 @@ def contact_domains(contact):
             host = raw.rsplit("@", 1)[1] if "@" in raw else ""
         else:
             url = raw if "://" in raw else "http://" + raw
-            host = urllib.parse.urlparse(url).hostname or ""
+            try:
+                host = urllib.parse.urlparse(url).hostname or ""
+            except ValueError:  # e.g. unbalanced brackets in operator-supplied text
+                continue
         domain = norm_domain(host)
         if domain:
             domains.add(domain)
@@ -332,11 +338,13 @@ def name_in_domain(name, domain):
     return bool(domain) and (name == domain or name.endswith("." + domain))
 
 
-def fcrdns_names(ip):
+def fcrdns_names(ip, domains=None):
     """Forward-confirmed reverse DNS names for ip (PTR whose A/AAAA includes ip).
 
     Names that do not resolve back to ip are dropped. Lookup failure is an empty set,
-    not an error: the resolver can still be other or unknown.
+    not an error: the resolver can still be other or unknown. With domains, only PTR
+    names under one of them are forward-checked; at most FCRDNS_NAMES names either way,
+    so a reverse zone with many slow names cannot stall the run.
     """
     import dns.resolver
     try:
@@ -348,9 +356,11 @@ def fcrdns_names(ip):
     except Exception:
         return set()
     rdtype = "A" if addr.version == 4 else "AAAA"
+    candidates = sorted({ptr.to_text().rstrip(".").lower() for ptr in ptrs})
+    if domains is not None:
+        candidates = [name for name in candidates if any(name_in_domain(name, d) for d in domains)]
     names = set()
-    for ptr in ptrs:
-        name = ptr.to_text().rstrip(".").lower()
+    for name in candidates[:FCRDNS_NAMES]:
         try:
             answers = dns.resolver.resolve(name, rdtype, lifetime=5)
         except Exception:
@@ -363,6 +373,43 @@ def fcrdns_names(ip):
             except ValueError:
                 continue
     return names
+
+
+def confirm_names(ips, domains_of):
+    """fcrdns_names for each ip within FCRDNS_BUDGET seconds. Checks that have not finished
+    by then count as no names; the run reports how many were skipped."""
+    if not ips:
+        return {}
+    pool = ThreadPoolExecutor(32)
+    futures = {pool.submit(fcrdns_names, ip, domains_of[ip]): ip for ip in ips}
+    done, pending = wait(futures, timeout=FCRDNS_BUDGET)
+    pool.shutdown(wait=False, cancel_futures=True)
+    if pending:
+        print(f"Reverse DNS budget reached: {len(pending)} of {len(ips)} checks skipped", file=sys.stderr)
+    return {futures[future]: future.result() for future in done}
+
+
+def resolvers_version(report):
+    """metadata.resolvers.version of a report, or None."""
+    resolvers = (report.get("metadata") or {}).get("resolvers") if isinstance(report, dict) else None
+    return resolvers.get("version") if isinstance(resolvers, dict) else None
+
+
+def primary_of(queries):
+    """Primary category, or None below LABEL estimated queries.
+
+    The four local tiers compete as one group, as version 1's single "local" did, so an
+    exit whose own resolvers span two tiers is not labelled by a smaller public share.
+    When that group wins, the primary is its largest tier.
+    """
+    if sum(queries.values()) < LABEL:
+        return None
+    local = {k: v for k, v in queries.items() if k in LOCAL_TIERS}
+    groups = {k: v for k, v in queries.items() if k not in LOCAL_TIERS}
+    if local:
+        groups["local"] = sum(local.values())
+    top = max(groups, key=groups.get)
+    return max(local, key=local.get) if top == "local" else top
 
 
 def fingerprint_of(value):
@@ -383,22 +430,25 @@ def weights_from_relays(relays):
 
 
 def load_previous(path, current_path, current_ts, limit=LOOKBACK):
-    """Earlier reports with resolver data, newest first: PREVIOUS_REPORT_JSON, then the
-    dns_health_*.json files named before the current one. Only strictly older reports count."""
+    """Earlier version-2 reports, newest first, from the dns_health_*.json files named before
+    the current one and PREVIOUS_REPORT_JSON (latest.json) as a fallback. Only strictly older
+    reports count. A dns_health file wins a timestamp tie, so a stale latest.json cannot hide
+    a rewritten report; version-1 reports are skipped because their "local" has no tiers and
+    carrying the rest of a v1 block would bias the shares toward public and other."""
     if not path:
         return []
     name = os.path.basename(current_path)
     older = sorted((p for p in glob.glob(os.path.join(os.path.dirname(path), "dns_health_*.json"))
                     if os.path.basename(p) < name), reverse=True)[:2 * limit]
     found, seen_ts = [], set()
-    for p in [path] + older:
+    for p in older + [path]:
         try:
             with open(p) as f:
                 prev = json.load(f)
             ts = prev["metadata"]["timestamp"]
         except (OSError, ValueError, KeyError, TypeError):
             continue
-        if prev["metadata"].get("resolvers") and ts not in seen_ts and epoch(ts) < current_ts:
+        if resolvers_version(prev) == 2 and ts not in seen_ts and epoch(ts) < current_ts:
             found.append(prev)
             seen_ts.add(ts)
         if len(found) == limit:
@@ -612,6 +662,15 @@ def add_resolver_stats(report, rows, previous=None, ranges=None, origin=origin_a
             looked = dict(zip(ordered, pool.map(origin, ordered)))
     else:
         looked = {}
+    # Outage guard. Published ranges, the exit's own address and the prefix tiers need no AS
+    # data, so during a Team Cymru or resolver outage "unknown" alone stays small while quad9,
+    # opendns, local_as and other silently vanish. Count the failed lookups instead.
+    failed = {ip for ip, asns in looked.items() if asns is None}
+    needed = sum(n for counts in est.values() for ip, n in counts.items() if ip in looked)
+    lost = sum(n for counts in est.values() for ip, n in counts.items() if ip in failed)
+    if (needed and lost > MAX_UNKNOWN * needed) or (looked and len(failed) > MAX_UNKNOWN * len(looked)):
+        raise RuntimeError(f"origin AS lookups failed for {len(failed)} of {len(looked)} addresses "
+                           f"({lost} of {needed} estimated queries)")
     for ip, provider in list(provider_of.items()):
         if not provider:
             provider_of[ip] = next((PUBLIC_ASNS[asn] for asn in sorted(looked.get(ip) or ())
@@ -684,16 +743,24 @@ def add_resolver_stats(report, rows, previous=None, ranges=None, origin=origin_a
             return "fcrdns"
         return None
 
-    unmatched = sorted({ip for fp, counts in est.items() for ip in counts
-                        if network_category(fp, ip) is None})
+    # Reverse DNS only for still-unmatched resolver IPs whose exits have an operator domain the
+    # name could sit under; heaviest first and capped, because anyone can add sampled queries
+    # (and so resolver IPs with slow reverse zones) during a scan window.
+    domains_of, weight_of = defaultdict(set), Counter()
+    for fp, counts in est.items():
+        for ip, n in counts.items():
+            if network_category(fp, ip) is None and contexts[fp]["domains"]:
+                domains_of[ip] |= contexts[fp]["domains"]
+                weight_of[ip] += n
+    todo = sorted(domains_of, key=lambda ip: (-weight_of[ip], ip))
+    if len(todo) > FCRDNS_MAX:
+        print(f"Reverse DNS capped: {len(todo) - FCRDNS_MAX} of {len(todo)} resolver IPs not checked",
+              file=sys.stderr)
+        todo = todo[:FCRDNS_MAX]
     if fcrdns is None:
-        if unmatched:
-            with ThreadPoolExecutor(32) as pool:
-                confirmed = dict(zip(unmatched, pool.map(fcrdns_names, unmatched)))
-        else:
-            confirmed = {}
+        confirmed = confirm_names(todo, domains_of)
     else:
-        confirmed = {ip: set(fcrdns(ip) or ()) for ip in unmatched}
+        confirmed = {ip: set(fcrdns(ip) or ()) for ip in todo}
 
     def classify(fp, ip):
         """(category, operator signal or None) for resolver ip used by exit fp."""
@@ -714,13 +781,12 @@ def add_resolver_stats(report, rows, previous=None, ranges=None, origin=origin_a
             new[fp][category] += n
             if reason:
                 signals[reason] += n
-    new_est = sum(sum(counts.values()) for counts in new.values())
-    lost = sum(counts["unknown"] for counts in new.values())
-    if new_est and lost > MAX_UNKNOWN * new_est:
-        raise RuntimeError(f"resolver AS lookups failed for {lost} of {new_est} estimated queries")
 
     now, carried = epoch(report["metadata"]["timestamp"]), {}
-    for prev in ([previous] if isinstance(previous, dict) else previous or []):  # newest first
+    previous = [previous] if isinstance(previous, dict) else list(previous or [])
+    previous = [prev for prev in previous if resolvers_version(prev) == 2]  # v1 "local" has no tiers
+    previous.sort(key=lambda prev: epoch(prev["metadata"]["timestamp"]), reverse=True)
+    for prev in previous:  # newest first: each exit is carried from the newest report that has it
         hours = (now - epoch(prev["metadata"]["timestamp"])) / 3600
         if hours <= 0:
             raise RuntimeError("previous report is not older than the current one")
@@ -737,16 +803,11 @@ def add_resolver_stats(report, rows, previous=None, ranges=None, origin=origin_a
         merged.update(new.get(result.get("exit_fingerprint"), {}))
         queries = {k: round(v, 2) for k, v in sorted(merged.items()) if v >= FLOOR}
         if not queries:
-            # A re-run over a version-1 file must not keep a resolver block whose only
-            # keys were dropped (legacy "local") once metadata.resolvers is version 2.
-            existing = result.get("resolver")
-            existing_queries = existing.get("queries") if isinstance(existing, dict) else None
-            if isinstance(existing_queries, dict) and existing_queries and not any(
-                    key in CATEGORIES for key in existing_queries):
-                result.pop("resolver", None)
+            # Rows and earlier reports are the only source: an existing block (e.g. from an
+            # in-place re-run over an already-processed report) must not survive unchanged.
             updates.append((result, None))
             continue
-        primary = max(queries, key=queries.get) if sum(queries.values()) >= LABEL else None
+        primary = primary_of(queries)
         updates.append((result, {
             "primary": primary,
             "public": primary in PROVIDERS if primary not in (None, "unknown") else None,
@@ -755,6 +816,8 @@ def add_resolver_stats(report, rows, previous=None, ranges=None, origin=origin_a
     for result, resolver in updates:
         if resolver:
             result["resolver"] = resolver
+        else:
+            result.pop("resolver", None)
 
     ok = [result for result in results if result.get("status") == "success"]
     share, wsum, seen, labelled, using_public = Counter(), 0.0, 0, 0, 0

@@ -113,7 +113,7 @@ class TestResolverStats(unittest.TestCase):
     def test_carry_forward_decay(self):
         """Earlier counts decay with the 84 h half-life before new rows are added."""
         previous = make_report(timestamp="2026-10-08T07:26:08.878754Z")  # 84 h earlier: one half-life
-        previous["metadata"]["resolvers"] = {"version": 1}
+        previous["metadata"]["resolvers"] = {"version": 2}
         prev_q = {FP_A: {"quad9": 20}, FP_C: {"google": 8}, FP_D: {"other": 50}}
         for r in previous["results"]:
             if r["exit_fingerprint"] in prev_q:
@@ -135,13 +135,13 @@ class TestResolverStats(unittest.TestCase):
         self.assertEqual(report, make_report())
 
     def test_load_previous_only_strictly_older_reports(self):
-        """Only strictly older reports with resolver data, newest first."""
+        """Only strictly older version-2 reports, newest first."""
         with tempfile.TemporaryDirectory() as d:
-            def write(name, ts, with_data):
+            def write(name, ts, with_data, version=2):
                 """Write a report into the temp dir and return its path."""
                 rep = make_report(timestamp=ts)
                 if with_data:
-                    rep["metadata"]["resolvers"] = {"version": 1, "name": name}
+                    rep["metadata"]["resolvers"] = {"version": version, "name": name}
                 with open(os.path.join(d, name), "w") as f:
                     json.dump(rep, f)
                 return os.path.join(d, name)
@@ -157,13 +157,33 @@ class TestResolverStats(unittest.TestCase):
                              ["dns_health_2026-10-11_00-05-01.json", "dns_health_2026-10-10_12-05-01.json"])
             self.assertEqual(load_previous(None, current, 0), [])
 
+    def test_load_previous_skips_version1_and_prefers_dns_health_over_latest(self):
+        """A stale v1 latest.json cannot hide the rewritten v2 report of the same scan."""
+        with tempfile.TemporaryDirectory() as d:
+            def write(name, ts, version):
+                """Write a report with resolver data of the given version."""
+                rep = make_report(timestamp=ts)
+                rep["metadata"]["resolvers"] = {"version": version, "name": name}
+                with open(os.path.join(d, name), "w") as f:
+                    json.dump(rep, f)
+                return os.path.join(d, name)
+            write("dns_health_2026-10-10_12-05-01.json", "2026-10-10T19:26:00Z", 1)   # not rewritten
+            write("dns_health_2026-10-11_00-05-01.json", "2026-10-11T07:26:00Z", 2)   # rewritten twin
+            latest = write("latest.json", "2026-10-11T07:26:00Z", 1)                  # stale v1 copy
+            current = os.path.join(d, "dns_health_2026-10-11_12-05-01.json")
+            with open(current, "w") as f:
+                json.dump(make_report(timestamp="2026-10-11T19:26:00Z"), f)
+            prev = load_previous(latest, current, resolver_stats.epoch("2026-10-11T19:26:00Z"))
+            self.assertEqual([p["metadata"]["resolvers"]["name"] for p in prev],
+                             ["dns_health_2026-10-11_00-05-01.json"])
+
     def test_exit_missing_from_newest_previous_is_carried_from_older(self):
         """An exit absent from the newest report keeps its older counts."""
         older = make_report(timestamp="2026-10-04T19:26:08Z")       # 7 days = 2 half-lives
-        older["metadata"]["resolvers"] = {"version": 1}
+        older["metadata"]["resolvers"] = {"version": 2}
         older["results"][2]["resolver"] = {"queries": {"google": 400}}
         newer = make_report(timestamp="2026-10-11T07:26:08Z")
-        newer["metadata"]["resolvers"] = {"version": 1}
+        newer["metadata"]["resolvers"] = {"version": 2}
         del newer["results"][2]                                       # exit C missing from that scan
         report = make_report()
         run(report, previous=[newer, older])
@@ -172,7 +192,7 @@ class TestResolverStats(unittest.TestCase):
     def test_previous_not_older_raises(self):
         """A previous report that is not older (e.g. a re-run) is refused."""
         same = make_report()
-        same["metadata"]["resolvers"] = {"version": 1}
+        same["metadata"]["resolvers"] = {"version": 2}
         report = make_report()
         with self.assertRaises(RuntimeError):
             run(report, previous=same)
@@ -197,25 +217,31 @@ class TestResolverStats(unittest.TestCase):
         self.assertEqual(report["metadata"]["resolvers"]["exits_using_public"], 0)
 
     def test_lookup_outage_aborts_without_touching_report(self):
-        """More than half the new queries without AS data: abort; at half: publish."""
+        """An origin-AS outage aborts even when prefix tiers keep 'unknown' small."""
         report = make_report()
-        rows = [row("u.aaaaaaaa.tor.exit.validator.1aeo.com", "192.0.2.10")] * 3 + \
-               [row("u.bbbbbbbb.tor.exit.validator.1aeo.com", "8.8.8.8")]  # list-matched: needs no AS lookup
+        # D's resolver shares its /24, so it would be local_24 without any AS data: under the old
+        # unknown-share guard only A's 10 queries (of 50) would be unknown and the run would publish.
+        rows = [row("u.dddddddd.tor.exit.validator.1aeo.com", "192.0.2.10")] * 4 + \
+               [row("u.aaaaaaaa.tor.exit.validator.1aeo.com", "198.51.100.1")]
         with self.assertRaises(RuntimeError):
-            run(report, rows=rows, origins={})                  # 30 of 40 estimated queries unknown
+            run(report, rows=rows, origins={})                  # every lookup failed
         self.assertEqual(report, make_report())
-        run(report, rows=rows[2:], origins={})                  # 10 of 20 unknown: at the limit, still published
+        partial = dict(ORIGINS, **{"203.0.113.6": {64502}})      # only 198.51.100.1 fails
+        run(report, rows=rows, origins=partial)
         self.assertEqual(report["results"][0]["resolver"]["queries"], {"unknown": 10})
+        self.assertEqual(report["results"][3]["resolver"]["queries"], {"local_24": 40})
 
     def test_unknown_counts_and_can_be_primary(self):
         """Queries without AS data still count toward shares; an 'unknown' primary has public=None."""
         rows = [row("u.aaaaaaaa.tor.exit.validator.1aeo.com", "198.51.100.1")] * 3 + \
-               [row("u.bbbbbbbb.tor.exit.validator.1aeo.com", "8.8.8.8")] * 4
+               [row("u.bbbbbbbb.tor.exit.validator.1aeo.com", "8.8.8.8")] * 4 + \
+               [row("u.dddddddd.tor.exit.validator.1aeo.com", "192.0.2.10")] * 4
         report = make_report()
-        s = run(report, rows=rows, weights={})
+        s = run(report, rows=rows, weights={})                    # 30 of 70 looked-up queries failed
         self.assertEqual(report["results"][0]["resolver"], {"primary": "unknown", "public": None,
                                                            "queries": {"unknown": 30}})
-        self.assertEqual((s["share_pct"]["unknown"], s["share_pct"]["google"]), (50.0, 50.0))
+        self.assertEqual((s["share_pct"]["unknown"], s["share_pct"]["google"], s["share_pct"]["local_24"]),
+                         (33.33, 33.33, 33.33))
         self.assertEqual(s["exits_using_public"], 1)
 
     def test_classification_rules(self):
@@ -286,8 +312,10 @@ class TestLocalTiers(unittest.TestCase):
     def test_same_prefix_is_local_even_when_as_lookup_fails(self):
         """A /24 match does not become unknown, and does not trip the unknown-share abort."""
         report = _exit_report(FP_A, "192.0.2.10")
-        run(report, rows=[row("u.aaaaaaaa.tor.exit.validator.1aeo.com", "192.0.2.20")] * 3, origins={})
-        self.assertEqual(report["results"][0]["resolver"]["queries"], {"local_24": 30})
+        rows = [row("u.aaaaaaaa.tor.exit.validator.1aeo.com", "192.0.2.20")] * 3 + \
+               [row("u.aaaaaaaa.tor.exit.validator.1aeo.com", "192.0.2.10")] * 4   # own address, AS known
+        run(report, rows=rows, origins={"192.0.2.10": {64500}})                  # 192.0.2.20 lookup fails
+        self.assertEqual(report["results"][0]["resolver"]["queries"], {"local_24": 70})
 
     def test_operator_by_address_prefix_and_confirmed_name(self):
         """Family address, footprint /24 and /48, and FCrDNS match; a same-AS hit stays local_as."""
@@ -429,16 +457,87 @@ class TestLocalTiers(unittest.TestCase):
             with open(path) as handle:
                 self.assertEqual(json.load(handle), report)
 
-    def test_legacy_local_counts_are_dropped_on_carry_forward(self):
-        """A carried 'local' key from a version-1 report is not a version-2 category."""
+    def test_version1_history_is_not_carried(self):
+        """A v1 report is skipped entirely: carrying its public part without its 'local' would bias shares."""
         previous = _exit_report(FP_A, "203.0.113.5")
         previous["metadata"]["timestamp"] = "2026-10-08T07:26:08.878754Z"  # 84 h earlier
         previous["metadata"]["resolvers"] = {"version": 1}
         previous["results"][0]["resolver"] = {"queries": {"local": 100, "google": 20}}
         report = _exit_report(FP_A, "203.0.113.5")
         run(report, rows=[row("u.aaaaaaaa.tor.exit.validator.1aeo.com", "8.8.8.8")], previous=previous)
+        self.assertEqual(report["results"][0]["resolver"]["queries"], {"google": 10})
+        # a stray legacy key inside a v2 block is dropped, the rest is carried
+        previous["metadata"]["resolvers"] = {"version": 2}
+        report = _exit_report(FP_A, "203.0.113.5")
+        run(report, rows=[row("u.aaaaaaaa.tor.exit.validator.1aeo.com", "8.8.8.8")], previous=previous)
         self.assertEqual(report["results"][0]["resolver"]["queries"], {"google": 20.0})
-        self.assertNotIn("local", report["results"][0]["resolver"]["queries"])
+
+    def test_newest_previous_wins_whatever_the_caller_order(self):
+        """add_resolver_stats sorts earlier reports itself; the newest one with the exit wins."""
+        older = make_report(timestamp="2026-10-04T19:26:08Z")
+        older["metadata"]["resolvers"] = {"version": 2}
+        older["results"][2]["resolver"] = {"queries": {"google": 400}}
+        newer = make_report(timestamp="2026-10-11T07:26:08Z")
+        newer["metadata"]["resolvers"] = {"version": 2}
+        newer["results"][2]["resolver"] = {"queries": {"local_24": 300}}
+        for order in ([newer, older], [older, newer]):
+            report = make_report()
+            run(report, previous=order)
+            self.assertEqual(report["results"][2]["resolver"]["primary"], "local_24")
+
+    def test_rerun_drops_stale_blocks_with_mixed_keys(self):
+        """An exit with nothing new or carried loses any existing block, even a mixed v1 one."""
+        report = _exit_report(FP_A, "198.51.100.10")
+        report["results"][0]["resolver"] = {"primary": "local", "public": False,
+                                            "queries": {"local": 90, "google": 10}}
+        run(report, rows=[row("u.bbbbbbbb.tor.exit.validator.1aeo.com", "8.8.8.8")])
+        self.assertNotIn("resolver", report["results"][0])
+        self.assertAlmostEqual(sum(report["metadata"]["resolvers"]["share_pct"].values()), 0.0)
+
+    def test_local_tiers_compete_as_one_group_for_primary(self):
+        """Split local traffic is not out-voted by a smaller public share (as v1 'local' was not)."""
+        self.assertEqual(resolver_stats.primary_of(
+            {"cloudflare": 31, "local_24": 43, "local_as": 32, "quad9": 46}), "local_24")
+        self.assertEqual(resolver_stats.primary_of({"cloudflare": 53, "local_22": 35, "local_24": 24}), "local_22")
+        self.assertEqual(resolver_stats.primary_of({"google": 60, "local_24": 20, "local_22": 15}), "google")
+        self.assertEqual(resolver_stats.primary_of({"local_24": 10, "google": 5}), None)    # below LABEL
+
+    def test_operator_is_checked_before_unknown(self):
+        """A family relay address is local_operator even when its own origin-AS lookup fails."""
+        contact = "url:https://ops.example"
+        relays = [_relay(FP_A, ["198.51.100.10:9001"], contact=contact),
+                  _relay(FP_B, ["198.18.0.77:9001"], contact=contact)]
+        rows = [row("u.aaaaaaaa.tor.exit.validator.1aeo.com", "198.18.0.77")] * 3 + \
+               [row("u.aaaaaaaa.tor.exit.validator.1aeo.com", "198.51.100.10")] * 4
+        report = _exit_report(FP_A, "198.51.100.10")
+        run(report, rows=rows, origins={"198.51.100.10": {50}}, weights={}, relays=relays)
+        self.assertEqual(report["results"][0]["resolver"]["queries"], {"local_24": 40, "local_operator": 30})
+
+    def test_malformed_contact_url_does_not_abort(self):
+        """Unbalanced brackets in operator-supplied url: values are skipped, not raised."""
+        self.assertEqual(resolver_stats.contact_domains("url:http://[x"), set())
+        self.assertEqual(resolver_stats.contact_domains("url:http://[x url:https://www.ok.example/a"), {"ok.example"})
+
+    def test_reverse_dns_only_for_ips_that_can_match_and_capped(self):
+        """No operator domain, no reverse DNS; the heaviest candidates first, at most FCRDNS_MAX."""
+        calls = []
+
+        def fcrdns(ip):
+            """Record which resolver IPs get a reverse-DNS check."""
+            calls.append(ip)
+            return set()
+        rows = [row("u.aaaaaaaa.tor.exit.validator.1aeo.com", "192.0.2.50")] * 3 + \
+               [row("u.aaaaaaaa.tor.exit.validator.1aeo.com", "192.0.2.51")]
+        origins = {"192.0.2.50": {77}, "192.0.2.51": {77}, "198.51.100.10": {50}}
+        report = _exit_report(FP_A, "198.51.100.10")
+        run(report, rows=rows, origins=origins, weights={}, relays=[_relay(FP_A, ["198.51.100.10:9001"])],
+            fcrdns=fcrdns)
+        self.assertEqual(calls, [])                                  # exit has no operator domain
+        relays = [_relay(FP_A, ["198.51.100.10:9001"], contact="url:https://ops.example")]
+        with mock.patch.object(resolver_stats, "FCRDNS_MAX", 1):
+            run(_exit_report(FP_A, "198.51.100.10"), rows=rows, origins=origins, weights={},
+                relays=relays, fcrdns=fcrdns)
+        self.assertEqual(calls, ["192.0.2.50"])                      # heaviest only, capped at 1
 
     def test_archive_rows_writes_only_sampled_fields(self):
         """The private archive keeps the four analytics fields and nothing else."""
@@ -671,6 +770,27 @@ class TestLookups(unittest.TestCase):
         fake.resolver = types.SimpleNamespace(resolve=fail)
         with mock.patch.dict(sys.modules, {"dns": fake, "dns.resolver": fake.resolver}):
             self.assertEqual(resolver_stats.fcrdns_names("192.0.2.50"), set())
+
+    def test_fcrdns_forward_checks_only_candidate_names(self):
+        """With domains, PTR names outside them are never forward-resolved; at most FCRDNS_NAMES are."""
+        forward = []
+
+        def resolve(name, rdtype, lifetime=None):
+            """Many PTR names; record every forward lookup."""
+            if rdtype == "PTR":
+                names = ["x%d.attacker.test." % i for i in range(50)] + ["dns.ops.example."]
+                return [types.SimpleNamespace(to_text=lambda n=n: n) for n in names]
+            forward.append(name)
+            return [types.SimpleNamespace(to_text=lambda: "192.0.2.50")]
+
+        fake = types.ModuleType("dns")
+        fake.resolver = types.SimpleNamespace(resolve=resolve)
+        with mock.patch.dict(sys.modules, {"dns": fake, "dns.resolver": fake.resolver}):
+            self.assertEqual(resolver_stats.fcrdns_names("192.0.2.50", {"ops.example"}), {"dns.ops.example"})
+            self.assertEqual(forward, ["dns.ops.example"])
+            forward.clear()
+            resolver_stats.fcrdns_names("192.0.2.50")
+            self.assertEqual(len(forward), resolver_stats.FCRDNS_NAMES)
 
 
 if __name__ == "__main__":
