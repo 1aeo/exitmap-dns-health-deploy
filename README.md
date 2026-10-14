@@ -83,11 +83,15 @@ aroivalidator (`https://aroivalidator.1aeo.com/latest.json`, rows with `valid: t
 re-validate and does not use Tor family declarations, ContactInfo or Allium. Exits without a
 validated AROI domain are never `local_operator`. A resolver matches the operator by the address of
 a relay validated for the same domain, that address's IPv4 /24 or IPv6 /48, a forward-confirmed
-reverse DNS name under the validated domain, or a forward-confirmed name carrying the operator's
-name from that domain as a whole label (e.g. `artikel10.in-berlin.de` for `artikel10.org`; at least
-5 characters, not a generic word). If Onionoo or the AROI file is unreachable the step is skipped.
-`operator_signals` counts this scan's new estimated queries per matching rule (address, prefix,
-fcrdns, name; not decayed, not weighted). Sampled rows are archived locally under `data/resolver_rows/`
+reverse DNS name under the validated domain, or a forward-confirmed name registered in the
+operator's name, i.e. whose registrable label under the [Public Suffix List](https://publicsuffix.org/list/)
+equals that of the validated domain (e.g. `artikel10.in-berlin.de` for `artikel10.org`, as
+`in-berlin.de` is a public suffix; the name must be at least 5 characters, not all digits and not a
+generic word). Unlike the other three, this rule can be met by anyone who registers that name under
+some public suffix. The list is cached in `data/` and fetched at most once a day; without it the
+name rule is off (`operator_sources.public_suffix_list` is false). If Onionoo or the AROI file is
+unreachable the step is skipped. `operator_signals` counts this scan's new estimated queries per
+matching rule (address, prefix, fcrdns, name; not decayed, not weighted). Sampled rows are archived locally under `data/resolver_rows/`
 (gitignored, not uploaded).
 
 ---

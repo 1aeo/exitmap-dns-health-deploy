@@ -11,6 +11,7 @@ backups/
 tmp/
 # Sampled resolver rows (private; DO Spaces objects are publicly readable, so never upload)
 data/resolver_rows/
+data/public_suffix_list.dat*
 public/*.json
 public/analysis_*/
 public/archives/

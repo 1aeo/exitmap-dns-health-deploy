@@ -49,12 +49,18 @@ from datetime import datetime, timezone
 #                   The group is every relay validated for the exit's domain. A resolver
 #                   matches it by a group relay's address, by the IPv4 /24 or IPv6 /48 of
 #                   one, by a forward-confirmed reverse DNS name under the validated domain,
-#                   or by a forward-confirmed name that carries the operator's name from that
-#                   domain as a whole label (artikel10.org -> a resolver named
-#                   artikel10.in-berlin.de at its hoster). That name must be at least
-#                   NAME_MIN characters and not a generic word (GENERIC_NAMES). AS equality
-#                   alone is not an operator match: a hoster such as OVH or Hetzner also hosts
-#                   other operators' resolvers.
+#                   or by a forward-confirmed name registered in the operator's name: its
+#                   registrable label under the Public Suffix List equals the one of the
+#                   validated domain (artikel10.org -> a resolver named artikel10.in-berlin.de
+#                   at its hoster, since in-berlin.de is a public suffix). That name must be at
+#                   least NAME_MIN characters, not all digits and not a generic word
+#                   (GENERIC_NAMES). Unlike the first three, this last rule can be met by
+#                   anyone who registers that name under some public suffix and points its PTR
+#                   and A/AAAA at their resolver; it is kept on purpose for operators whose
+#                   resolver sits at a hoster, and operator_signals.name shows its weight.
+#                   Without the list (no fetch and no recent cached copy) the rule is off.
+#                   AS equality alone is not an operator match: a hoster such as OVH or
+#                   Hetzner also hosts other operators' resolvers.
 #
 # google: Google's egress list, not Google's ASNs (AS15169/AS396982 also carry Google Cloud VMs,
 #   e.g. an exit's own resolver). Public DNS FAQ, https://developers.google.com/speed/public-dns/faq#locations :
@@ -118,12 +124,19 @@ GENERIC_NAMES = frozenset({  # words too common in hostnames to identify an oper
     "email", "admin", "local", "static", "dynamic", "client", "customer", "dedicated", "example",
     "torproject", "github", "gitlab", "google", "cloudflare", "amazon", "microsoft", "public",
     "service", "services", "infra", "gateway", "default",
-    # shared hosting / dynamic-DNS platforms whose name sits where an operator's would
+    # shared hosting / dynamic-DNS platforms: a backstop for one missing from the Public Suffix List
+    # (on a listed platform the registrable label is the user's own name, not the platform's)
     "amazonaws", "dyndns", "no-ip", "noip", "ddnss", "duckdns", "dynv6", "blogspot", "codeberg",
     "netlify", "vercel", "herokuapp", "pages", "gitbook", "hopto", "zapto", "sytes", "servehttp",
     "serveftp", "myftp", "homelinux", "homeip", "dynu", "freedns", "afraid", "mooo", "dnsalias",
     "selfip", "webhop", "ddnsking", "myddns", "dyndns-home", "changeip"})
-_SECOND_LEVEL = frozenset({"co", "com", "net", "org", "ac", "gov", "edu", "ne", "or", "go"})
+# Registrable domains come from the Public Suffix List, ICANN and private sections (the private
+# one lists hosters and dynamic-DNS platforms that hand out names under their own domain, such as
+# in-berlin.de or hopto.org). https://publicsuffix.org/list/ : "have your app download the list
+# no more than once per day".
+PSL_URL = "https://publicsuffix.org/list/public_suffix_list.dat"
+PSL_MAX_AGE = 86400       # refetch the cached list once it is older than a day
+PSL_STALE = 30 * 86400    # if a fetch fails, a cached copy up to this old is still used
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -215,22 +228,32 @@ def published_ranges():
             for name, nets in (("google", google), ("cloudflare", cloudflare), ("ffmuc", FFMUC_RANGES))}
 
 
-def fetch_json(url, timeout):
-    """GET url and parse a JSON body. No Authorization header is sent.
+def _open(url, timeout):
+    """GET url without an Authorization header, refusing redirects.
 
-    Redirects are refused, same as the GraphQL client. These calls carry no
-    credentials; refusing a 3xx keeps a directory host from sending the cron
-    job to some other URL.
+    Same as the GraphQL client. These calls carry no credentials; refusing a 3xx
+    keeps a directory host from sending the cron job to some other URL.
     """
     req = urllib.request.Request(url, headers={"User-Agent": "exitdnshealth-resolver-stats"})
     try:
-        with GRAPHQL_OPENER.open(req, timeout=timeout) as resp:
-            return json.load(resp)
+        return GRAPHQL_OPENER.open(req, timeout=timeout)
     except urllib.error.HTTPError as exc:
         if 300 <= exc.code < 400:
             host = urllib.parse.urlparse(url).hostname or "directory host"
             raise RuntimeError(f"refusing redirect from {host}") from None
         raise
+
+
+def fetch_json(url, timeout):
+    """GET url (see _open) and parse a JSON body."""
+    with _open(url, timeout) as resp:
+        return json.load(resp)
+
+
+def fetch_text(url, timeout):
+    """GET url (see _open) and return the body (at most 16 MiB) as UTF-8 text."""
+    with _open(url, timeout) as resp:
+        return resp.read(16 << 20).decode("utf-8")
 
 
 def fetch_onionoo():
@@ -277,6 +300,60 @@ def fetch_aroi():
     raise RuntimeError(f"AROI validator unavailable: {last}")
 
 
+def _data_dir():
+    """The deploy's private data/ directory (outside public/, gitignored, never uploaded)."""
+    deploy = os.environ.get("DEPLOY_DIR") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(deploy, "data")
+
+
+def parse_suffixes(text):
+    """Public Suffix List rules as a set of ASCII (IDNA) strings, e.g. "co.uk", "*.ck", "!www.ck"."""
+    rules = set()
+    for line in text.splitlines():
+        rule = line.strip().split()[0].lower() if line.strip() else ""
+        if not rule or rule.startswith("//"):
+            continue
+        try:
+            rule = rule.encode("idna").decode("ascii")
+        except UnicodeError:
+            pass
+        rules.add(rule)
+    return frozenset(rules)
+
+
+def public_suffixes():
+    """Public Suffix List rules, cached in data/ for a day. Never raises.
+
+    Falls back to a cached copy up to PSL_STALE old when the fetch fails, and to an empty set
+    (the name rule is off for this run) when there is none.
+    """
+    path = os.path.join(_data_dir(), "public_suffix_list.dat")
+    try:
+        age = time.time() - os.path.getmtime(path)
+    except OSError:
+        age = None
+    if age is None or age > PSL_MAX_AGE:
+        try:
+            text = fetch_text(PSL_URL, timeout=60)
+            if "===BEGIN ICANN DOMAINS===" not in text or "===BEGIN PRIVATE DOMAINS===" not in text:
+                raise RuntimeError("not the public suffix list")
+            os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+            tmp = f"{path}.{os.getpid()}.tmp"
+            with open(tmp, "w", encoding="utf-8") as out:
+                out.write(text)
+            os.replace(tmp, path)
+            return parse_suffixes(text)
+        except Exception as e:
+            print(f"Public suffix list fetch failed: {e!r}", file=sys.stderr)
+            if age is None or age > PSL_STALE:
+                return frozenset()
+    try:
+        with open(path, encoding="utf-8") as f:
+            return parse_suffixes(f.read())
+    except OSError:
+        return frozenset()
+
+
 def parse_address(value):
     """IP from a bare address, '1.2.3.4:port', or '[2001:db8::1]:port'. None if it is not an IP."""
     if not isinstance(value, str):
@@ -318,43 +395,48 @@ def name_in_domain(name, domain):
     return bool(domain) and (name == domain or name.endswith("." + domain))
 
 
-def operator_name(domain):
-    """The operator's name inside a validated AROI domain, for matching hostname labels.
+def registrable_label(name, suffixes):
+    """The label a DNS name is registered under, per the Public Suffix List algorithm.
 
-    The label left of the registrable suffix: artikel10.org -> artikel10, relays.example.org
-    -> example, foo.co.uk -> foo. Empty when the label is shorter than NAME_MIN, all digits,
-    or a generic word, so only distinctive names can match.
+    artikel10.org -> artikel10, relays.example.co.uk -> example, artikel10.in-berlin.de ->
+    artikel10 (in-berlin.de is a public suffix). Empty when the name is itself a public suffix
+    or there are no rules (fail safe).
     """
-    labels = [label for label in norm_domain(domain).split(".") if label]
-    if len(labels) < 2:
+    labels = (name or "").lower().strip(".").split(".")
+    if not suffixes or len(labels) < 2 or not all(labels):
         return ""
-    if len(labels) >= 3 and len(labels[-1]) == 2:
-        # ccTLD with more labels: only a known generic second level (example.co.uk) is
-        # trusted; anything else may be a multi-label public suffix (tokyo.jp, ddnss.eu),
-        # whose label would be a place or platform name, so no name at all (fail safe).
-        if labels[-2] not in _SECOND_LEVEL:
-            return ""
-        name = labels[-3]
-    else:
-        name = labels[-2]
+    size = 1  # the list's default rule "*": the last label is a public suffix
+    for i in range(len(labels)):  # longest candidate first, so the first rule that matches prevails
+        tail = ".".join(labels[i:])
+        if "!" + tail in suffixes:
+            size = len(labels) - i - 1
+            break
+        if tail in suffixes or (i + 1 < len(labels) and "*." + ".".join(labels[i + 1:]) in suffixes):
+            size = len(labels) - i
+            break
+    return labels[-size - 1] if len(labels) > size else ""
+
+
+def operator_name(domain, suffixes):
+    """The operator's name inside a validated AROI domain: its registrable label.
+
+    Empty when the label is shorter than NAME_MIN, all digits or a generic word, so only
+    distinctive names can match, and when there are no suffix rules.
+    """
+    name = registrable_label(norm_domain(domain), suffixes)
     if len(name) < NAME_MIN or name.isdigit() or name in GENERIC_NAMES:
         return ""
     return name
 
 
-def has_label(name, labels):
-    """True when one of a DNS name's labels is in labels (whole-label match)."""
-    return bool(labels) and any(part in labels for part in (name or "").lower().rstrip(".").split("."))
-
-
-def fcrdns_names(ip, domains=None, names=None):
+def fcrdns_names(ip, domains=None, names=None, suffixes=None):
     """Forward-confirmed reverse DNS names for ip (PTR whose A/AAAA includes ip).
 
     Names that do not resolve back to ip are dropped. Lookup failure is an empty set,
     not an error: the resolver can still be other or unknown. With domains or names, only
-    PTR names under one of the domains or carrying one of the names as a whole label are
-    forward-checked; at most FCRDNS_NAMES names either way, so a reverse zone with many
-    slow names cannot stall the run.
+    PTR names under one of the domains or registered under one of the names (registrable
+    label, see registrable_label) are forward-checked; at most FCRDNS_NAMES names either
+    way, so a reverse zone with many slow names cannot stall the run.
     """
     import dns.resolver
     try:
@@ -368,10 +450,11 @@ def fcrdns_names(ip, domains=None, names=None):
     rdtype = "A" if addr.version == 4 else "AAAA"
     candidates = sorted({ptr.to_text().rstrip(".").lower() for ptr in ptrs})
     if domains is not None or names is not None:
-        # Names under an operator domain first; at most one name that matches only by label,
-        # since such a name's forward lookup may go to anyone's (possibly slow) nameserver.
+        # Names under an operator domain first; at most one name that matches only as registered
+        # in the operator's name, since its forward lookup may go to anyone's (slow) nameserver.
         in_domain = [name for name in candidates if any(name_in_domain(name, d) for d in domains or ())]
-        by_label = [name for name in candidates if name not in in_domain and has_label(name, names)]
+        by_label = [name for name in candidates
+                    if name not in in_domain and names and registrable_label(name, suffixes) in names]
         candidates = in_domain + by_label[:1]
     names = set()
     for name in candidates[:FCRDNS_NAMES]:
@@ -389,14 +472,14 @@ def fcrdns_names(ip, domains=None, names=None):
     return names
 
 
-def confirm_names(ips, domains_of, names_of=None):
+def confirm_names(ips, domains_of, names_of=None, suffixes=None):
     """fcrdns_names for each ip within FCRDNS_BUDGET seconds. Checks that have not finished
     by then count as no names; the run reports how many were skipped."""
     if not ips:
         return {}
     names_of = names_of or {}
     pool = ThreadPoolExecutor(32)
-    futures = {pool.submit(fcrdns_names, ip, domains_of.get(ip, set()), names_of.get(ip, set())): ip
+    futures = {pool.submit(fcrdns_names, ip, domains_of.get(ip, set()), names_of.get(ip, set()), suffixes): ip
                for ip in ips}
     done, pending = wait(futures, timeout=FCRDNS_BUDGET)
     pool.shutdown(wait=False, cancel_futures=True)
@@ -486,8 +569,7 @@ def archive_rows(report_path, rows):
     does not fail the resolver step.
     """
     try:
-        deploy = os.environ.get("DEPLOY_DIR") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        dest_dir = os.path.join(deploy, "data", "resolver_rows")
+        dest_dir = os.path.join(_data_dir(), "resolver_rows")
         os.makedirs(dest_dir, mode=0o700, exist_ok=True)
         os.chmod(dest_dir, 0o700)
         base = os.path.basename(report_path)
@@ -559,11 +641,11 @@ def _operator_group(fp, aroi_domain, aroi_by_domain):
     return (domain, set(aroi_by_domain.get(domain, ()))) if domain else (None, set())
 
 
-def _group_footprint(domain, members, by_fp):
+def _group_footprint(domain, members, by_fp, suffixes):
     """Addresses, IPv4 /24s, IPv6 /48s, domains and operator names of an AROI operator group."""
     addrs, nets4, nets6 = set(), set(), set()
     domains = {domain} if domain else set()
-    names = {operator_name(domain)} - {""} if domain else set()
+    names = {operator_name(domain, suffixes)} - {""} if domain else set()
     for member in members:
         relay = by_fp.get(member)
         if not relay:
@@ -578,7 +660,7 @@ def _group_footprint(domain, members, by_fp):
 
 
 def add_resolver_stats(report, rows, previous=None, ranges=None, origin=origin_asns, weights=None,
-                       relays=None, aroi=None, fcrdns=None):
+                       relays=None, aroi=None, fcrdns=None, suffixes=None):
     """Add results[].resolver and metadata.resolvers (version 2) to report.
 
     rows are this scan's sampled analytics records. previous is one report or a
@@ -586,9 +668,9 @@ def add_resolver_stats(report, rows, previous=None, ranges=None, origin=origin_a
     example a legacy "local") are dropped. ranges, origin, relays, aroi and fcrdns
     override the live lookups so tests and a backfill can inject data. relays=None
     fetches Onionoo and aroi=None fetches the aroivalidator results; either raises if
-    unreachable. fcrdns(ip) returns forward-confirmed
-    names. Raises, leaving report unchanged, when there is nothing to publish or the
-    data looks broken.
+    unreachable. fcrdns(ip) returns forward-confirmed names. suffixes=None loads the
+    Public Suffix List (an empty set turns the name rule off). Raises, leaving report
+    unchanged, when there is nothing to publish or the data looks broken.
     """
     results = report["results"]
     suffix = "." + os.environ.get("DNS_WILDCARD_DOMAIN", "tor.exit.validator.1aeo.com").lower().strip(".")
@@ -617,6 +699,8 @@ def add_resolver_stats(report, rows, previous=None, ranges=None, origin=origin_a
         relays = fetch_onionoo()
     if aroi is None:
         aroi = fetch_aroi()
+    if suffixes is None:
+        suffixes = public_suffixes()
     relays_by_fp = _index_relays(relays)
     aroi_domain, aroi_by_domain = _index_aroi(aroi)
     if weights is None:
@@ -672,7 +756,7 @@ def add_resolver_stats(report, rows, previous=None, ranges=None, origin=origin_a
         if fp not in footprints:
             domain, members = _operator_group(fp, aroi_domain, aroi_by_domain)
             if domain not in by_members:
-                by_members[domain] = _group_footprint(domain, members, relays_by_fp)
+                by_members[domain] = _group_footprint(domain, members, relays_by_fp, suffixes)
             footprints[fp] = by_members[domain]
         return footprints[fp]
 
@@ -729,7 +813,7 @@ def add_resolver_stats(report, rows, previous=None, ranges=None, origin=origin_a
             return "prefix"
         if any(name_in_domain(name, domain) for name in confirmed for domain in ctx["domains"]):
             return "fcrdns"
-        if any(has_label(name, ctx["names"]) for name in confirmed):
+        if ctx["names"] and any(registrable_label(name, suffixes) in ctx["names"] for name in confirmed):
             return "name"
         return None
 
@@ -750,7 +834,7 @@ def add_resolver_stats(report, rows, previous=None, ranges=None, origin=origin_a
               file=sys.stderr)
         todo = todo[:FCRDNS_MAX]
     if fcrdns is None:
-        confirmed = confirm_names(todo, domains_of, names_of)
+        confirmed = confirm_names(todo, domains_of, names_of, suffixes)
     else:
         confirmed = {ip: set(fcrdns(ip) or ()) for ip in todo}
 
@@ -836,7 +920,7 @@ def add_resolver_stats(report, rows, previous=None, ranges=None, origin=origin_a
         "thresholds": {"seen": SEEN, "label": LABEL}, "weighted": bool(weights),
         "exits_total": len(ok), "exits_covered": seen, "exits_labelled": labelled,
         "exits_using_public": using_public, "public_share_pct": public_pct, "share_pct": pct,
-        "operator_sources": {"onionoo": True, "aroi": True},
+        "operator_sources": {"onionoo": True, "aroi": True, "public_suffix_list": bool(suffixes)},
         "operator_signals": {"address": signals["address"], "prefix": signals["prefix"],
                              "fcrdns": signals["fcrdns"], "name": signals["name"]},
         "classification": {
@@ -850,7 +934,8 @@ def add_resolver_stats(report, rows, previous=None, ranges=None, origin=origin_a
                                "from AROI validation (https://aroivalidator.1aeo.com/latest.json); matched "
                                "by a relay address of the operator, its IPv4 /24 or IPv6 /48, a forward-"
                                "confirmed reverse DNS name under the validated domain, or a forward-"
-                               "confirmed name carrying the operator's name from that domain as a label"),
+                               "confirmed name whose registrable label (Public Suffix List) is the "
+                               "operator's name from that domain"),
             "unknown": "origin AS lookup failed"},
     }
     return report["metadata"]["resolvers"]
