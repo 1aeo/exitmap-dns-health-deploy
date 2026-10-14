@@ -254,6 +254,18 @@ async function loadStats() {
                     ${items.map(([lbl, v]) => `<div class="detail-item"><span class="detail-label">${lbl}:</span> <span class="detail-value">${v}</span></div>`).join('')}
                 </div>
             `;
+            // Version 2: the exit's own resolvers by distance, then the rest
+            const share = rs.share_pct || {};
+            if (share.local_24 !== undefined) {
+                const local = [['/24', 'local_24'], ['/22', 'local_22'], ['AS', 'local_as'], ['Operator', 'local_operator'], ['Other', 'other'], ['Unknown', 'unknown']]
+                    .map(([label, key]) => [label, pct(share[key])]);
+                html += `
+                <div class="details-row">
+                    <div class="detail-item"><span class="detail-label" style="color: var(--aeo-green); cursor: help;" title="Share of exit DNS lookups sent via the exit's own resolvers: same IPv4 /24 or IPv6 /64 as the exit (including its own address), same IPv4 /22 or IPv6 /48, same origin AS, or run by the same operator in another network. Other: any other resolver. Unknown: its network could not be looked up.">🏠 Local DNS resolvers:</span></div>
+                    ${local.map(([lbl, v]) => `<div class="detail-item"><span class="detail-label">${lbl}:</span> <span class="detail-value">${v}</span></div>`).join('')}
+                </div>
+            `;
+            }
         }
 
         // Compute failures from results (no longer stored in separate array)

@@ -79,9 +79,12 @@ then `local_24` (same IPv4 /24 or IPv6 /64 as the exit, including its own addres
 (same IPv4 /22 or IPv6 /48, outside that tighter prefix), `local_as` (same origin AS, outside those
 prefixes), `local_operator` (same operator, outside the exit's prefix and AS), plus `other` and
 `unknown`. `local_operator` uses the Onionoo effective family, a validated AROI domain, and — only
-when that domain is missing — an identical ContactInfo string. `operator_signals` counts this
-scan's new estimated queries that matched by address, prefix, or forward-confirmed reverse DNS
-(not decayed, not weighted). Sampled rows are archived locally under `data/resolver_rows/`
+when that domain is missing — an identical ContactInfo string. A resolver whose forward-confirmed
+hostname carries the operator's name from its validated AROI domain as a whole label (e.g.
+`artikel10.in-berlin.de` for `artikel10.org`; at least 5 characters, not a generic word) also counts
+as `local_operator`. `operator_signals` counts this scan's new estimated queries that matched by
+address, prefix, forward-confirmed reverse DNS under an operator domain, or operator name (not
+decayed, not weighted). Sampled rows are archived locally under `data/resolver_rows/`
 (gitignored, not uploaded).
 
 ---

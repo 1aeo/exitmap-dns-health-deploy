@@ -46,10 +46,14 @@ from datetime import datetime, timezone
 #                   results[].valid == true). When that domain is missing, relays with the
 #                   same normalized ContactInfo string are the fallback; ContactInfo is
 #                   unverified. A resolver matches the group by address, by the IPv4 /24 or
-#                   IPv6 /48 of a group address, or by a forward-confirmed reverse DNS name
+#                   IPv6 /48 of a group address, by a forward-confirmed reverse DNS name
 #                   under an operator domain (the AROI domain, or a ContactInfo url:/email:
-#                   domain). AS equality alone is not an operator match: a hoster such as
-#                   OVH or Hetzner also hosts other operators' resolvers.
+#                   domain), or by a forward-confirmed name that carries the operator's name
+#                   from a validated AROI domain as a whole label (artikel10.org -> a resolver
+#                   named artikel10.in-berlin.de at its hoster). That name must be at least
+#                   NAME_MIN characters and not a generic word (GENERIC_NAMES). AS equality
+#                   alone is not an operator match: a hoster such as OVH or Hetzner also hosts
+#                   other operators' resolvers.
 #
 # google: Google's egress list, not Google's ASNs (AS15169/AS396982 also carry Google Cloud VMs,
 #   e.g. an exit's own resolver). Public DNS FAQ, https://developers.google.com/speed/public-dns/faq#locations :
@@ -108,6 +112,15 @@ FCRDNS_MAX = 2000    # reverse-DNS checks per run, resolver IPs with the most es
 FCRDNS_BUDGET = 180  # seconds for all reverse-DNS checks; checks still running count as no match
 FCRDNS_NAMES = 4     # PTR names forward-checked per IP, only names under a candidate operator domain
 _FETCH_ATTEMPTS = 3
+NAME_MIN = 5         # shortest operator name (from a validated AROI domain) matched inside a hostname
+GENERIC_NAMES = frozenset({  # words too common in hostnames to identify an operator
+    "relay", "relays", "exits", "exitnode", "nodes", "router", "resolver", "resolv", "resolve",
+    "privacy", "server", "servers", "proxy", "cloud", "hosting", "network", "networks", "internet",
+    "online", "digital", "global", "secure", "security", "anonymous", "onion", "onions", "freedom",
+    "email", "admin", "local", "static", "dynamic", "client", "customer", "dedicated", "example",
+    "torproject", "github", "gitlab", "google", "cloudflare", "amazon", "microsoft", "public",
+    "service", "services", "infra", "gateway", "default"})
+_SECOND_LEVEL = frozenset({"co", "com", "net", "org", "ac", "gov", "edu", "ne", "or", "go"})
 _CONTACT_FIELD = re.compile(r"(?:^|\s)(url|email):(\S+)", re.IGNORECASE)
 
 
@@ -338,13 +351,38 @@ def name_in_domain(name, domain):
     return bool(domain) and (name == domain or name.endswith("." + domain))
 
 
-def fcrdns_names(ip, domains=None):
+def operator_name(domain):
+    """The operator's name inside a validated AROI domain, for matching hostname labels.
+
+    The label left of the registrable suffix: artikel10.org -> artikel10, relays.example.org
+    -> example, foo.co.uk -> foo. Empty when the label is shorter than NAME_MIN, all digits,
+    or a generic word, so only distinctive names can match.
+    """
+    labels = [label for label in norm_domain(domain).split(".") if label]
+    if len(labels) < 2:
+        return ""
+    if len(labels) >= 3 and labels[-2] in _SECOND_LEVEL and len(labels[-1]) == 2:
+        name = labels[-3]
+    else:
+        name = labels[-2]
+    if len(name) < NAME_MIN or name.isdigit() or name in GENERIC_NAMES:
+        return ""
+    return name
+
+
+def has_label(name, labels):
+    """True when one of a DNS name's labels is in labels (whole-label match)."""
+    return bool(labels) and any(part in labels for part in (name or "").lower().rstrip(".").split("."))
+
+
+def fcrdns_names(ip, domains=None, names=None):
     """Forward-confirmed reverse DNS names for ip (PTR whose A/AAAA includes ip).
 
     Names that do not resolve back to ip are dropped. Lookup failure is an empty set,
-    not an error: the resolver can still be other or unknown. With domains, only PTR
-    names under one of them are forward-checked; at most FCRDNS_NAMES names either way,
-    so a reverse zone with many slow names cannot stall the run.
+    not an error: the resolver can still be other or unknown. With domains or names, only
+    PTR names under one of the domains or carrying one of the names as a whole label are
+    forward-checked; at most FCRDNS_NAMES names either way, so a reverse zone with many
+    slow names cannot stall the run.
     """
     import dns.resolver
     try:
@@ -357,8 +395,9 @@ def fcrdns_names(ip, domains=None):
         return set()
     rdtype = "A" if addr.version == 4 else "AAAA"
     candidates = sorted({ptr.to_text().rstrip(".").lower() for ptr in ptrs})
-    if domains is not None:
-        candidates = [name for name in candidates if any(name_in_domain(name, d) for d in domains)]
+    if domains is not None or names is not None:
+        candidates = [name for name in candidates
+                      if any(name_in_domain(name, d) for d in domains or ()) or has_label(name, names)]
     names = set()
     for name in candidates[:FCRDNS_NAMES]:
         try:
@@ -375,13 +414,15 @@ def fcrdns_names(ip, domains=None):
     return names
 
 
-def confirm_names(ips, domains_of):
+def confirm_names(ips, domains_of, names_of=None):
     """fcrdns_names for each ip within FCRDNS_BUDGET seconds. Checks that have not finished
     by then count as no names; the run reports how many were skipped."""
     if not ips:
         return {}
+    names_of = names_of or {}
     pool = ThreadPoolExecutor(32)
-    futures = {pool.submit(fcrdns_names, ip, domains_of[ip]): ip for ip in ips}
+    futures = {pool.submit(fcrdns_names, ip, domains_of.get(ip, set()), names_of.get(ip, set())): ip
+               for ip in ips}
     done, pending = wait(futures, timeout=FCRDNS_BUDGET)
     pool.shutdown(wait=False, cancel_futures=True)
     if pending:
@@ -564,16 +605,19 @@ def _operator_group(fp, by_fp, by_contact, aroi_domain, aroi_by_domain, aroi_ava
 
 
 def _group_footprint(members, by_fp, aroi_domain, use_contact):
-    """Addresses, IPv4 /24s, IPv6 /48s and domains of an operator group.
+    """Addresses, IPv4 /24s, IPv6 /48s, domains and operator names of an operator group.
 
-    Validated AROI domains always count. ContactInfo url:/email: domains are unverified, so
-    they count only when the exit itself has no validated AROI domain (the contact fallback).
+    Validated AROI domains always count, and only they supply operator names. ContactInfo
+    url:/email: domains are unverified, so they count only when the exit itself has no
+    validated AROI domain (the contact fallback).
     """
-    addrs, nets4, nets6, domains = set(), set(), set(), set()
+    addrs, nets4, nets6, domains, names = set(), set(), set(), set(), set()
     for member in members:
         domain = aroi_domain.get(member)
         if domain:
             domains.add(domain)
+            if operator_name(domain):
+                names.add(operator_name(domain))
         relay = by_fp.get(member)
         if not relay:
             continue
@@ -585,7 +629,7 @@ def _group_footprint(members, by_fp, aroi_domain, use_contact):
                 nets4.add(_containing(addr, 24))
             else:
                 nets6.add(_containing(addr, 48))
-    return addrs, nets4, nets6, domains
+    return addrs, nets4, nets6, domains, names
 
 
 def add_resolver_stats(report, rows, previous=None, ranges=None, origin=origin_asns, weights=None,
@@ -702,7 +746,7 @@ def add_resolver_stats(report, rows, previous=None, ranges=None, origin=origin_a
         asns = set()
         for addr in addrs:
             asns |= looked.get(str(addr)) or set()
-        op_addrs, op24, op48, domains = footprint(fp)
+        op_addrs, op24, op48, domains, names = footprint(fp)
         contexts[fp] = {
             "addrs": addrs,
             "v4_24": {_containing(addr, 24) for addr in v4},
@@ -710,6 +754,7 @@ def add_resolver_stats(report, rows, previous=None, ranges=None, origin=origin_a
             "v6_64": {_containing(addr, 64) for addr in v6},
             "v6_48": {_containing(addr, 48) for addr in v6},
             "asns": asns, "op_addrs": op_addrs, "op24": op24, "op48": op48, "domains": domains,
+            "names": names,
         }
 
     def network_category(fp, ip):
@@ -736,7 +781,7 @@ def add_resolver_stats(report, rows, previous=None, ranges=None, origin=origin_a
         return None
 
     def operator_reason(fp, ip, confirmed):
-        """Which operator signal matches, or None. Address, then prefix, then FCrDNS."""
+        """Which operator signal matches, or None. Address, prefix, FCrDNS domain, then name."""
         addr = ipaddress.ip_address(ip)
         ctx = contexts[fp]
         if addr in ctx["op_addrs"]:
@@ -747,24 +792,28 @@ def add_resolver_stats(report, rows, previous=None, ranges=None, origin=origin_a
             return "prefix"
         if any(name_in_domain(name, domain) for name in confirmed for domain in ctx["domains"]):
             return "fcrdns"
+        if any(has_label(name, ctx["names"]) for name in confirmed):
+            return "name"
         return None
 
     # Reverse DNS only for still-unmatched resolver IPs whose exits have an operator domain the
     # name could sit under; heaviest first and capped, because anyone can add sampled queries
     # (and so resolver IPs with slow reverse zones) during a scan window.
-    domains_of, weight_of = defaultdict(set), Counter()
+    domains_of, names_of, weight_of = defaultdict(set), defaultdict(set), Counter()
     for fp, counts in est.items():
+        ctx = contexts[fp]
         for ip, n in counts.items():
-            if network_category(fp, ip) is None and contexts[fp]["domains"]:
-                domains_of[ip] |= contexts[fp]["domains"]
+            if network_category(fp, ip) is None and (ctx["domains"] or ctx["names"]):
+                domains_of[ip] |= ctx["domains"]
+                names_of[ip] |= ctx["names"]
                 weight_of[ip] += n
-    todo = sorted(domains_of, key=lambda ip: (-weight_of[ip], ip))
+    todo = sorted(weight_of, key=lambda ip: (-weight_of[ip], ip))
     if len(todo) > FCRDNS_MAX:
         print(f"Reverse DNS capped: {len(todo) - FCRDNS_MAX} of {len(todo)} resolver IPs not checked",
               file=sys.stderr)
         todo = todo[:FCRDNS_MAX]
     if fcrdns is None:
-        confirmed = confirm_names(todo, domains_of)
+        confirmed = confirm_names(todo, domains_of, names_of)
     else:
         confirmed = {ip: set(fcrdns(ip) or ()) for ip in todo}
 
@@ -852,7 +901,7 @@ def add_resolver_stats(report, rows, previous=None, ranges=None, origin=origin_a
         "exits_using_public": using_public, "public_share_pct": public_pct, "share_pct": pct,
         "operator_sources": {"onionoo": True, "aroi": bool(aroi_available)},
         "operator_signals": {"address": signals["address"], "prefix": signals["prefix"],
-                             "fcrdns": signals["fcrdns"]},
+                             "fcrdns": signals["fcrdns"], "name": signals["name"]},
         "classification": {
             "google": GOOGLE_RANGES, "cloudflare": CLOUDFLARE_RANGES,
             "quad9": "AS42 AS715 AS1288 AS19281", "opendns": "AS36692",
@@ -862,7 +911,9 @@ def add_resolver_stats(report, rows, previous=None, ranges=None, origin=origin_a
             "local_as": "same origin AS as the exit, outside its IPv4 /22 or IPv6 /48",
             "local_operator": ("same operator (Onionoo effective_family, validated AROI domain, "
                                "or identical ContactInfo) outside the exit's prefix and AS; "
-                               "matched by address, IPv4 /24 or IPv6 /48, or forward-confirmed reverse DNS"),
+                               "matched by address, IPv4 /24 or IPv6 /48, forward-confirmed reverse DNS "
+                               "under an operator domain, or a forward-confirmed name carrying the "
+                               "operator's name from its validated AROI domain as a whole label"),
             "unknown": "origin AS lookup failed"},
     }
     return report["metadata"]["resolvers"]

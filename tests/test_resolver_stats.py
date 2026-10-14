@@ -341,7 +341,7 @@ class TestLocalTiers(unittest.TestCase):
                       fcrdns=confirmed.get)
         queries = report["results"][0]["resolver"]["queries"]
         self.assertEqual(queries, {"local_as": 10, "local_operator": 40, "other": 10})
-        self.assertEqual(summary["operator_signals"], {"address": 10, "prefix": 20, "fcrdns": 10})
+        self.assertEqual(summary["operator_signals"], {"address": 10, "prefix": 20, "fcrdns": 10, "name": 0})
         self.assertEqual((report["results"][0]["resolver"]["primary"],
                           report["results"][0]["resolver"]["public"]), ("local_operator", False))
 
@@ -400,8 +400,8 @@ class TestLocalTiers(unittest.TestCase):
                                    fcrdns=lambda ip: set())
         self.assertEqual(untouched, make_report())
 
-    def test_confirmed_name_must_sit_under_the_operator_domain(self):
-        """A PTR like artikel10.in-berlin.de does not match the AROI domain artikel10.org."""
+    def test_operator_name_label_matches_a_resolver_at_its_hoster(self):
+        """artikel10.in-berlin.de is not under artikel10.org, but carries the operator's name as a label."""
         self.assertTrue(resolver_stats.name_in_domain("dns.dotsrc.org", "dotsrc.org"))
         self.assertTrue(resolver_stats.name_in_domain("dotsrc.org", "dotsrc.org"))
         self.assertFalse(resolver_stats.name_in_domain("artikel10.in-berlin.de", "artikel10.org"))
@@ -413,7 +413,38 @@ class TestLocalTiers(unittest.TestCase):
         run(report, rows=[row("u.aaaaaaaa.tor.exit.validator.1aeo.com", "217.197.91.153")],
             origins=origins, weights={}, relays=relays, aroi=aroi,
             fcrdns=lambda ip: {"artikel10.in-berlin.de"} if ip == "217.197.91.153" else set())
-        self.assertEqual(report["results"][0]["resolver"]["queries"], {"other": 10})
+        self.assertEqual(report["results"][0]["resolver"]["queries"], {"local_operator": 10})
+        self.assertEqual(report["metadata"]["resolvers"]["operator_signals"]["name"], 10)
+
+    def test_operator_name_rule_stays_narrow(self):
+        """No match from unverified ContactInfo, partial labels, generic or short names, or unconfirmed PTRs."""
+        origins = {"198.51.100.10": {60729}, "217.197.91.153": {29670}}
+
+        def queries(aroi, contact="", ptr="artikel10.in-berlin.de"):
+            """Classify one row from 217.197.91.153 whose confirmed name is ptr."""
+            report = _exit_report(FP_A, "198.51.100.10")
+            run(report, rows=[row("u.aaaaaaaa.tor.exit.validator.1aeo.com", "217.197.91.153")],
+                origins=origins, weights={}, relays=[_relay(FP_A, ["198.51.100.10:9001"], contact=contact)],
+                aroi=aroi, fcrdns=lambda ip: {ptr} if ptr and ip == "217.197.91.153" else set())
+            return report["results"][0]["resolver"]["queries"]
+        valid = [{"fingerprint": FP_A, "valid": True, "domain": "artikel10.org"}]
+        self.assertEqual(queries([], contact="url:https://artikel10.org"), {"other": 10})   # unverified contact
+        self.assertEqual(queries([dict(valid[0], valid=False)]), {"other": 10})            # invalid AROI row
+        self.assertEqual(queries(valid, ptr="artikel10x.in-berlin.de"), {"other": 10})      # partial label
+        self.assertEqual(queries(valid, ptr=""), {"other": 10})                            # not forward-confirmed
+        self.assertEqual(queries([{"fingerprint": FP_A, "valid": True, "domain": "relay.example"}],
+                                 ptr="relay.in-berlin.de"), {"other": 10})                  # generic name
+        self.assertEqual(queries([{"fingerprint": FP_A, "valid": True, "domain": "dfri.se"}],
+                                 ptr="dfri.in-berlin.de"), {"other": 10})                   # shorter than NAME_MIN
+
+    def test_operator_name_from_domain(self):
+        """The label left of the registrable suffix; empty for short, numeric or generic names."""
+        self.assertEqual(resolver_stats.operator_name("artikel10.org"), "artikel10")
+        self.assertEqual(resolver_stats.operator_name("relays.Zwiebelnet.ORG."), "zwiebelnet")
+        self.assertEqual(resolver_stats.operator_name("www.applied-privacy.net"), "applied-privacy")
+        self.assertEqual(resolver_stats.operator_name("torrelays.co.uk"), "torrelays")
+        for domain in ("dfri.se", "12345.net", "relay.net", "privacy.org", "localhost", "", None):
+            self.assertEqual(resolver_stats.operator_name(domain), "", domain)
 
     def test_non_string_contact_and_aroi_domain_do_not_abort(self):
         """A non-string ContactInfo or AROI domain is ignored and classification still finishes."""
@@ -788,6 +819,25 @@ class TestLookups(unittest.TestCase):
         fake.resolver = types.SimpleNamespace(resolve=fail)
         with mock.patch.dict(sys.modules, {"dns": fake, "dns.resolver": fake.resolver}):
             self.assertEqual(resolver_stats.fcrdns_names("192.0.2.50"), set())
+
+    def test_fcrdns_candidates_include_operator_name_labels(self):
+        """A PTR carrying an operator name as a whole label is forward-checked like one under a domain."""
+        forward = []
+
+        def resolve(name, rdtype, lifetime=None):
+            """PTRs at a hoster; record every forward lookup."""
+            if rdtype == "PTR":
+                names = ["artikel10.in-berlin.de.", "artikel10x.in-berlin.de.", "web1.in-berlin.de."]
+                return [types.SimpleNamespace(to_text=lambda n=n: n) for n in names]
+            forward.append(name)
+            return [types.SimpleNamespace(to_text=lambda: "217.197.91.153")]
+
+        fake = types.ModuleType("dns")
+        fake.resolver = types.SimpleNamespace(resolve=resolve)
+        with mock.patch.dict(sys.modules, {"dns": fake, "dns.resolver": fake.resolver}):
+            self.assertEqual(resolver_stats.fcrdns_names("217.197.91.153", set(), {"artikel10"}),
+                             {"artikel10.in-berlin.de"})
+        self.assertEqual(forward, ["artikel10.in-berlin.de"])
 
     def test_fcrdns_forward_checks_only_candidate_names(self):
         """With domains, PTR names outside them are never forward-resolved; at most FCRDNS_NAMES are."""
