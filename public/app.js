@@ -284,7 +284,7 @@ async function loadStats() {
             if (rs.share_pct) {
                 const covered = Number(rs.exits_covered) || 0;
                 const total = Number(rs.exits_total) || 0;
-                html += row('📡 All DNS resolvers', "Estimated share of exit DNS lookups (weighted by exit probability), from sampled queries at our authoritative DNS over recent scans (3.5-day half-life). Every lookup is in exactly one of Public, Local, Other and Unknown, so the four add up to 100%. Other: any other resolver. Unknown: its network could not be looked up. Exits covered: exits with DNS success and enough sampled queries to count, out of all exits with DNS success.", [
+                html += row('📡 All DNS resolvers', "Estimated share of exit DNS lookups (weighted by exit probability), from sampled queries at our authoritative DNS over recent scans (3.5-day half-life). Every lookup is in exactly one of Public, Local, Other and Unknown. Other: any other resolver. Unknown: its network could not be looked up. Exits covered: exits with DNS success and enough sampled queries to count, out of all exits with DNS success.", [
                     ['Exits covered', `${pct(total ? 100 * covered / total : 0)} (${covered.toLocaleString()} / ${total.toLocaleString()})`],
                     ['Public', shareOf(publicKeys, rs.public_share_pct.all)],
                     ['Local', shareOf(localKeys, localKeys.reduce((sum, key) => sum + (Number(share[key]) || 0), 0))],
