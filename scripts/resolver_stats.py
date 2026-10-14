@@ -726,6 +726,13 @@ def add_resolver_stats(report, rows, previous=None, ranges=None, origin=origin_a
         merged.update(new.get(result.get("exit_fingerprint"), {}))
         queries = {k: round(v, 2) for k, v in sorted(merged.items()) if v >= FLOOR}
         if not queries:
+            # A re-run over a version-1 file must not keep a resolver block whose only
+            # keys were dropped (legacy "local") once metadata.resolvers is version 2.
+            existing = result.get("resolver")
+            existing_queries = existing.get("queries") if isinstance(existing, dict) else None
+            if isinstance(existing_queries, dict) and existing_queries and not any(
+                    key in CATEGORIES for key in existing_queries):
+                result.pop("resolver", None)
             updates.append((result, None))
             continue
         primary = max(queries, key=queries.get) if sum(queries.values()) >= LABEL else None
@@ -788,9 +795,10 @@ def main(report_path, previous_path=None):
     start, end = scan_window(report)
     suffix = os.environ.get("DNS_WILDCARD_DOMAIN", "tor.exit.validator.1aeo.com").lower().strip(".")
     rows = graphql_rows(start, end, suffix)
+    # Keep the sampled rows even when classification later aborts (for example Onionoo is down).
+    archive_rows(report_path, rows)
     previous = load_previous(previous_path, report_path, epoch(report["metadata"]["timestamp"]))
     summary = add_resolver_stats(report, rows, previous)
-    archive_rows(report_path, rows)
     with open(report_path + ".tmp", "w") as f:
         json.dump(report, f)
     os.replace(report_path + ".tmp", report_path)

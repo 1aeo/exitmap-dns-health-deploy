@@ -403,6 +403,32 @@ class TestLocalTiers(unittest.TestCase):
         self.assertEqual(resolver_stats.norm_contact({"email": "x"}), "")
         self.assertEqual(resolver_stats.contact_domains(["url:https://example.net"]), set())
 
+    def test_legacy_only_resolver_block_is_removed_when_nothing_remains(self):
+        """An in-place re-run drops a resolver block that contained only legacy keys."""
+        report = _exit_report(FP_A, "198.51.100.10")
+        report["results"][0]["resolver"] = {"primary": "local", "public": False, "queries": {"local": 40}}
+        run(report, rows=[row("u.bbbbbbbb.tor.exit.validator.1aeo.com", "8.8.8.8")])
+        self.assertNotIn("resolver", report["results"][0])
+        self.assertEqual(report["metadata"]["resolvers"]["version"], 2)
+
+    def test_rows_are_archived_before_classification(self):
+        """Fetched rows are kept when classification raises, and the report file stays unchanged."""
+        with tempfile.TemporaryDirectory() as tmp:
+            report = make_report()
+            path = os.path.join(tmp, "dns_health_x.json")
+            with open(path, "w") as handle:
+                json.dump(report, handle)
+            with mock.patch.object(resolver_stats, "graphql_rows", return_value=ROWS), \
+                 mock.patch.object(resolver_stats, "add_resolver_stats", side_effect=RuntimeError("onionoo")), \
+                 mock.patch.dict(os.environ, {"DEPLOY_DIR": tmp}):
+                with self.assertRaises(RuntimeError):
+                    resolver_stats.main(path)
+            archive = os.path.join(tmp, "data", "resolver_rows", "dns_health_x.jsonl.gz")
+            with gzip.open(archive, "rt", encoding="utf-8") as handle:
+                self.assertEqual(json.loads(handle.readline())["sourceIP"], ROWS[0]["sourceIP"])
+            with open(path) as handle:
+                self.assertEqual(json.load(handle), report)
+
     def test_legacy_local_counts_are_dropped_on_carry_forward(self):
         """A carried 'local' key from a version-1 report is not a version-2 category."""
         previous = _exit_report(FP_A, "203.0.113.5")
