@@ -513,6 +513,24 @@ class TestLocalTiers(unittest.TestCase):
         run(report, rows=rows, origins={"198.51.100.10": {50}}, weights={}, relays=relays)
         self.assertEqual(report["results"][0]["resolver"]["queries"], {"local_24": 40, "local_operator": 30})
 
+    def test_contact_domains_count_only_without_a_validated_aroi_domain(self):
+        """With a validated AROI domain, a group member's unverified ContactInfo domain is not an operator domain."""
+        relays = [_relay(FP_A, ["198.51.100.10:9001"], family=[FP_A, FP_B], contact="url:https://ops.example"),
+                  _relay(FP_B, ["198.51.100.200:9001"], family=[FP_A, FP_B], contact="url:https://unrelated.example")]
+        rows = [row("u.aaaaaaaa.tor.exit.validator.1aeo.com", "192.0.2.50")] * 3
+        origins = {"192.0.2.50": {77}, "198.51.100.10": {50}}
+
+        def names(ip):
+            """192.0.2.50 forward-confirms under the member's unrelated contact domain."""
+            return {"dns.unrelated.example"} if ip == "192.0.2.50" else set()
+        aroi = [{"fingerprint": FP_A, "valid": True, "domain": "ops.example"}]
+        report = _exit_report(FP_A, "198.51.100.10")
+        run(report, rows=rows, origins=origins, weights={}, relays=relays, aroi=aroi, fcrdns=names)
+        self.assertEqual(report["results"][0]["resolver"]["queries"], {"other": 30})
+        report = _exit_report(FP_A, "198.51.100.10")                 # no AROI domain: contact fallback
+        run(report, rows=rows, origins=origins, weights={}, relays=relays, aroi=[], fcrdns=names)
+        self.assertEqual(report["results"][0]["resolver"]["queries"], {"local_operator": 30})
+
     def test_malformed_contact_url_does_not_abort(self):
         """Unbalanced brackets in operator-supplied url: values are skipped, not raised."""
         self.assertEqual(resolver_stats.contact_domains("url:http://[x"), set())

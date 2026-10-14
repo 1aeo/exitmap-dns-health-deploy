@@ -563,8 +563,12 @@ def _operator_group(fp, by_fp, by_contact, aroi_domain, aroi_by_domain, aroi_ava
     return group
 
 
-def _group_footprint(members, by_fp, aroi_domain):
-    """Addresses, IPv4 /24s, IPv6 /48s and domains of an operator group."""
+def _group_footprint(members, by_fp, aroi_domain, use_contact):
+    """Addresses, IPv4 /24s, IPv6 /48s and domains of an operator group.
+
+    Validated AROI domains always count. ContactInfo url:/email: domains are unverified, so
+    they count only when the exit itself has no validated AROI domain (the contact fallback).
+    """
     addrs, nets4, nets6, domains = set(), set(), set(), set()
     for member in members:
         domain = aroi_domain.get(member)
@@ -573,7 +577,8 @@ def _group_footprint(members, by_fp, aroi_domain):
         relay = by_fp.get(member)
         if not relay:
             continue
-        domains |= contact_domains(relay.get("contact"))
+        if use_contact:
+            domains |= contact_domains(relay.get("contact"))
         for addr in _relay_addresses(relay):
             addrs.add(addr)
             if addr.version == 4:
@@ -683,9 +688,10 @@ def add_resolver_stats(report, rows, previous=None, ranges=None, origin=origin_a
         if fp not in footprints:
             members = _operator_group(fp, relays_by_fp, relays_by_contact, aroi_domain,
                                       aroi_by_domain, aroi_available)
-            key = tuple(sorted(members))
+            use_contact = not (aroi_available and aroi_domain.get(fingerprint_of(fp)))
+            key = (tuple(sorted(members)), use_contact)
             if key not in by_members:
-                by_members[key] = _group_footprint(members, relays_by_fp, aroi_domain)
+                by_members[key] = _group_footprint(members, relays_by_fp, aroi_domain, use_contact)
             footprints[fp] = by_members[key]
         return footprints[fp]
 
