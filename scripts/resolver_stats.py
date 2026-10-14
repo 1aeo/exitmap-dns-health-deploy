@@ -20,7 +20,7 @@ tier except the exit's own address. Anything else is other, or unknown when the
 origin-AS lookup failed.
 """
 
-import glob, gzip, ipaddress, json, os, re, sys, time, urllib.parse, urllib.request
+import glob, gzip, ipaddress, json, os, re, sys, time, unicodedata, urllib.parse, urllib.request
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime, timezone
@@ -308,17 +308,13 @@ def _data_dir():
 
 
 def parse_suffixes(text):
-    """Public Suffix List rules as a set of ASCII (IDNA) strings, e.g. "co.uk", "*.ck", "!www.ck"."""
+    """Public Suffix List rules as a set of ASCII strings (see _punycode), e.g. "co.uk", "*.ck", "!www.ck"."""
     rules = set()
     for line in text.splitlines():
         rule = line.strip().split()[0].lower() if line.strip() else ""
         if not rule or rule.startswith("//"):
             continue
-        try:
-            rule = rule.encode("idna").decode("ascii")
-        except UnicodeError:
-            pass
-        rules.add(rule)
+        rules.add(_punycode(rule) or rule)
     return frozenset(rules)
 
 
@@ -397,12 +393,32 @@ def name_in_domain(name, domain):
 
 
 def _punycode(name):
-    """A DNS name in ASCII (IDNA) form, as the suffix rules and PTR answers are; "" if invalid."""
-    name = (name or "").lower().strip(".")
-    try:
-        return name.encode("idna").decode("ascii")
-    except UnicodeError:
-        return name if name.isascii() else ""
+    """A DNS name in ASCII form, as PTR answers are: non-ASCII labels as xn-- plus RFC 3492 Punycode.
+
+    Not the stdlib "idna" codec: its IDNA 2003 Nameprep maps straße to strasse, which would merge
+    two different domains. Plain Punycode is one-to-one, so distinct names stay distinct. A label
+    that is not already in stable lowercase NFKC form (fullwidth or other compatibility characters,
+    which IDNA 2008 would map or reject) makes the whole name invalid: "".
+    """
+    labels = []
+    for label in (name or "").lower().strip(".").split("."):
+        if label.isascii():
+            labels.append(label)
+        elif unicodedata.normalize("NFKC", label) == label:
+            labels.append("xn--" + label.encode("punycode").decode("ascii"))
+        else:
+            return ""
+    return ".".join(labels)
+
+
+def _unicode_label(label):
+    """An xn-- label decoded for display and length checks; other labels unchanged."""
+    if label.startswith("xn--"):
+        try:
+            return label[4:].encode("ascii").decode("punycode")
+        except UnicodeError:
+            pass
+    return label
 
 
 def registrable_label(name, suffixes):
@@ -434,10 +450,7 @@ def operator_name(domain, suffixes):
     distinctive names can match, and when there are no suffix rules.
     """
     name = registrable_label(norm_domain(domain), suffixes)
-    try:
-        shown = name.encode("ascii").decode("idna")  # NAME_MIN etc. apply to the name as written
-    except UnicodeError:
-        shown = name
+    shown = _unicode_label(name)  # NAME_MIN etc. apply to the name as written
     if len(shown) < NAME_MIN or shown.isdigit() or shown in GENERIC_NAMES:
         return ""
     return name

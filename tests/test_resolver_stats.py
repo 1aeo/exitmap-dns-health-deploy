@@ -465,7 +465,7 @@ class TestLocalTiers(unittest.TestCase):
         """A Unicode AROI domain and the punycode PTR of a resolver at its hoster give the same name."""
         self.assertEqual(resolver_stats.operator_name("bücher.org", SUFFIXES), "xn--bcher-kva")
         self.assertEqual(resolver_stats.registrable_label("xn--bcher-kva.in-berlin.de", SUFFIXES), "xn--bcher-kva")
-        self.assertEqual(resolver_stats.operator_name("bü.org", SUFFIXES), "")  # NAME_MIN counts "bü", not "xn--b-xka"
+        self.assertEqual(resolver_stats.operator_name("bü.org", SUFFIXES), "")  # NAME_MIN counts "bü", not "xn--b-eha"
         relays = [_relay(FP_A, ["198.51.100.10:9001"])]
         report = _exit_report(FP_A, "198.51.100.10")
         run(report, rows=[row("u.aaaaaaaa.tor.exit.validator.1aeo.com", "217.197.91.153")],
@@ -488,6 +488,22 @@ class TestLocalTiers(unittest.TestCase):
         self.assertEqual(report["results"][0]["resolver"]["queries"], {"local_operator": 20})
         self.assertEqual(report["metadata"]["resolvers"]["operator_signals"],
                          {"address": 10, "prefix": 0, "fcrdns": 10, "name": 0})
+
+    def test_punycode_keeps_distinct_names_distinct(self):
+        """straße.de and xn--strae-oqa.de are one name, strasse.de another; compatibility forms are rejected."""
+        puny = resolver_stats._punycode
+        self.assertEqual(puny("Straße.DE."), "xn--strae-oqa.de")
+        self.assertEqual(puny("xn--strae-oqa.de"), "xn--strae-oqa.de")
+        self.assertEqual(puny("strasse.de"), "strasse.de")
+        self.assertEqual(puny("公司.cn"), "xn--55qx5d.cn")
+        self.assertEqual(puny("ｅxample.org"), "")  # fullwidth: IDNA 2008 maps or rejects it
+        domain_of, by_domain = resolver_stats._index_aroi([
+            {"fingerprint": FP_A, "valid": True, "domain": "straße.de"},
+            {"fingerprint": FP_B, "valid": True, "domain": "xn--strae-oqa.de"},
+            {"fingerprint": FP_C, "valid": True, "domain": "strasse.de"},
+            {"fingerprint": FP_D, "valid": True, "domain": "ｅxample.org"}])
+        self.assertEqual(dict(by_domain), {"xn--strae-oqa.de": {FP_A, FP_B}, "strasse.de": {FP_C}})
+        self.assertEqual(resolver_stats.operator_name("straße.de", SUFFIXES), "xn--strae-oqa")
 
     def test_local_operator_counts_carry_only_from_aroi_identity_reports(self):
         """Earlier v2 reports (operators also from family/ContactInfo) do not carry local_operator."""
