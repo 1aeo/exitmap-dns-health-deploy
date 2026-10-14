@@ -29,6 +29,7 @@ err() { log_error "$1"; exit 1; }
     echo "  R2_BUCKET              - R2 bucket name"
     echo "  DO_SPACES_BUCKET       - DO Spaces bucket name"
     echo "  CUSTOM_DOMAIN          - Custom domain (e.g., exitdnshealth.1aeo.com)"
+    echo "  CACHE_KEY_VERSION      - Edge cache-key version (default: 1; bump after rewriting historical files)"
     exit 0
 }
 
@@ -59,6 +60,8 @@ require_cmd npm || err "npm required"
 : "${WRANGLER_COMPATIBILITY_DATE:=2025-01-01}"
 : "${CACHE_TTL_LATEST:=60}"
 : "${CACHE_TTL_HISTORICAL:=31536000}"
+: "${CACHE_KEY_VERSION:=1}"
+[[ "$CACHE_KEY_VERSION" =~ ^[A-Za-z0-9._-]{1,32}$ ]] || err "CACHE_KEY_VERSION must be 1-32 characters from [A-Za-z0-9._-]"
 : "${DO_SPACES_REGION:=nyc3}"
 : "${DO_SPACES_CDN:=false}"
 
@@ -85,6 +88,7 @@ pages_build_output_dir = "pages-static"
 STORAGE_ORDER = "${STORAGE_ORDER}"
 CACHE_TTL_LATEST = "${CACHE_TTL_LATEST}"
 CACHE_TTL_HISTORICAL = "${CACHE_TTL_HISTORICAL}"
+CACHE_KEY_VERSION = "${CACHE_KEY_VERSION}"
 EOF
 
     if [[ -n "${DO_SPACES_URL:-}" ]]; then

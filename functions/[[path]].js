@@ -113,7 +113,9 @@ export async function onRequest({ request, env, params, next, waitUntil }) {
 
   // Try cache first
   const cache = caches.default;
-  const cacheKey = new Request(url.origin + '/' + path);
+  // Versioned so a rewrite of immutable historical files is visible without a zone purge.
+  // Bump CACHE_KEY_VERSION (Pages var) after replacing dns_health_*.json in storage.
+  const cacheKey = new Request(url.origin + '/' + path + '?v=' + (env.CACHE_KEY_VERSION || '1'));
   const cached = await cache.match(cacheKey);
   if (cached) {
     const res = new Response(cached.body, cached);

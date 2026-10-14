@@ -9,6 +9,8 @@ pages-static/
 logs/
 backups/
 tmp/
+# Sampled resolver rows (private; DO Spaces objects are publicly readable, so never upload)
+data/resolver_rows/
 public/*.json
 public/analysis_*/
 public/archives/
