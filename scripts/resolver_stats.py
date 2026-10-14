@@ -41,16 +41,17 @@ from datetime import datetime, timezone
 #   local_22        same IPv4 /22 or IPv6 /48, but not the same /24 or /64
 #   local_as        same origin AS as one of the exit's addresses, outside those prefixes
 #   local_operator  same operator, but outside the exit's /22 (/48) and origin AS.
-#                   The operator group is Onionoo effective_family, plus relays that share
-#                   the exit's validated AROI domain (https://aroivalidator.1aeo.com/latest.json,
-#                   results[].valid == true). When that domain is missing, relays with the
-#                   same normalized ContactInfo string are the fallback; ContactInfo is
-#                   unverified. A resolver matches the group by address, by the IPv4 /24 or
-#                   IPv6 /48 of a group address, by a forward-confirmed reverse DNS name
-#                   under an operator domain (the AROI domain, or a ContactInfo url:/email:
-#                   domain), or by a forward-confirmed name that carries the operator's name
-#                   from a validated AROI domain as a whole label (artikel10.org -> a resolver
-#                   named artikel10.in-berlin.de at its hoster). That name must be at least
+#                   Operator identity comes only from AROI validation as published by our
+#                   aroivalidator (https://aroivalidator.1aeo.com/latest.json, results[] with
+#                   valid == true and its domain); it is not re-validated here, and Tor family
+#                   declarations, ContactInfo and Allium are not used. An exit without a
+#                   validated AROI domain has no operator group and is never local_operator.
+#                   The group is every relay validated for the exit's domain. A resolver
+#                   matches it by a group relay's address, by the IPv4 /24 or IPv6 /48 of
+#                   one, by a forward-confirmed reverse DNS name under the validated domain,
+#                   or by a forward-confirmed name that carries the operator's name from that
+#                   domain as a whole label (artikel10.org -> a resolver named
+#                   artikel10.in-berlin.de at its hoster). That name must be at least
 #                   NAME_MIN characters and not a generic word (GENERIC_NAMES). AS equality
 #                   alone is not an operator match: a hoster such as OVH or Hetzner also hosts
 #                   other operators' resolvers.
@@ -92,11 +93,8 @@ PUBLIC_ASNS = {
 PROVIDERS = ("google", "cloudflare", "quad9", "opendns", "ffmuc")
 LOCAL_TIERS = ("local_24", "local_22", "local_as", "local_operator")
 CATEGORIES = PROVIDERS + LOCAL_TIERS + ("other", "unknown")
-# `as` is part of the directory snapshot the operator group is built from. Classification does
-# not use it: Onionoo's AS can be the network the relay is announced in, while local_as is the
-# Team Cymru origin AS of each of the exit's addresses.
 ONIONOO_URL = ("https://onionoo.torproject.org/details?type=relay&running=true"
-               "&fields=fingerprint,or_addresses,exit_addresses,effective_family,contact,as,exit_probability")
+               "&fields=fingerprint,or_addresses,exit_addresses,exit_probability")
 AROI_URL = "https://aroivalidator.1aeo.com/latest.json"
 GRAPHQL = "https://api.cloudflare.com/client/v4/graphql"
 QUERY = """query($z:String!,$f:ZoneDnsAnalyticsAdaptiveFilter_InputObject!){viewer{zones(filter:{zoneTag:$z}){
@@ -122,9 +120,10 @@ GENERIC_NAMES = frozenset({  # words too common in hostnames to identify an oper
     "service", "services", "infra", "gateway", "default",
     # shared hosting / dynamic-DNS platforms whose name sits where an operator's would
     "amazonaws", "dyndns", "no-ip", "noip", "ddnss", "duckdns", "dynv6", "blogspot", "codeberg",
-    "netlify", "vercel", "herokuapp", "pages", "gitbook"})
+    "netlify", "vercel", "herokuapp", "pages", "gitbook", "hopto", "zapto", "sytes", "servehttp",
+    "serveftp", "myftp", "homelinux", "homeip", "dynu", "freedns", "afraid", "mooo", "dnsalias",
+    "selfip", "webhop", "ddnsking", "myddns", "dyndns-home", "changeip"})
 _SECOND_LEVEL = frozenset({"co", "com", "net", "org", "ac", "gov", "edu", "ne", "or", "go"})
-_CONTACT_FIELD = re.compile(r"(?:^|\s)(url|email):(\S+)", re.IGNORECASE)
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -257,21 +256,25 @@ def fetch_onionoo():
 
 
 def fetch_aroi():
-    """Validated AROI rows, or None when the file cannot be fetched.
+    """AROI results from our aroivalidator. Raises after retries if the file is unusable.
 
-    None means continue without the AROI part of the operator group. An empty list
-    means the file was fetched and no relay is currently validated.
+    AROI validation is the only source of operator identity, so without it local_operator
+    could not be told from other; failing the step is safer and the lookback covers a
+    missed scan. An empty list means no relay is currently validated.
     """
-    try:
-        data = fetch_json(AROI_URL, timeout=60)
-    except Exception as e:
-        print(f"AROI validator unavailable ({e}); operator groups omit AROI domains", file=sys.stderr)
-        return None
-    results = data.get("results") if isinstance(data, dict) else None
-    if not isinstance(results, list):
-        print("AROI validator unavailable (no results); operator groups omit AROI domains", file=sys.stderr)
-        return None
-    return results
+    last = "no attempt"
+    for attempt in range(_FETCH_ATTEMPTS):
+        try:
+            data = fetch_json(AROI_URL, timeout=60)
+            results = data.get("results") if isinstance(data, dict) else None
+            if not isinstance(results, list):
+                raise RuntimeError("AROI validator returned no results list")
+            return results
+        except Exception as e:
+            last = e
+            if attempt + 1 < _FETCH_ATTEMPTS:
+                time.sleep(2 * (attempt + 1))
+    raise RuntimeError(f"AROI validator unavailable: {last}")
 
 
 def parse_address(value):
@@ -294,19 +297,6 @@ def parse_address(value):
         return None
 
 
-def norm_contact(contact):
-    """ContactInfo compared for the operator fallback: lowercased, whitespace collapsed.
-
-    The string is not authenticated. Operators who publish the same contact text are
-    grouped only when a validated AROI domain is not available for the exit.
-    A missing or non-string value is ignored so a bad directory record cannot abort
-    the resolver step.
-    """
-    if not isinstance(contact, str):
-        return ""
-    return " ".join(contact.lower().split())
-
-
 def norm_domain(value):
     """Registrable-looking hostname: lowercased, no trailing dot, a leading www. removed."""
     value = (value or "").strip().lower().strip(".")
@@ -319,32 +309,6 @@ def norm_domain(value):
     except ValueError:
         return value
     return ""
-
-
-def contact_domains(contact):
-    """Domains named by CIISS url: and email: in contact. '[]' stands for '@'.
-
-    Only those two keys count. Other contact text is not a domain signal.
-    A missing or non-string contact yields no domains.
-    """
-    if not isinstance(contact, str):
-        return set()
-    domains = set()
-    for key, raw in _CONTACT_FIELD.findall(contact):
-        raw = raw.strip().strip("<>\"'")
-        if key.lower() == "email":
-            raw = raw.replace("[]", "@")
-            host = raw.rsplit("@", 1)[1] if "@" in raw else ""
-        else:
-            url = raw if "://" in raw else "http://" + raw
-            try:
-                host = urllib.parse.urlparse(url).hostname or ""
-            except ValueError:  # e.g. unbalanced brackets in operator-supplied text
-                continue
-        domain = norm_domain(host)
-        if domain:
-            domains.add(domain)
-    return domains
 
 
 def name_in_domain(name, domain):
@@ -560,26 +524,21 @@ def _relay_addresses(relay):
 
 
 def _index_relays(relays):
-    """fingerprint -> relay, plus contact -> fingerprints for the ContactInfo fallback."""
-    by_fp, by_contact = {}, defaultdict(set)
+    """fingerprint -> relay."""
+    by_fp = {}
     for relay in relays or []:
         if not isinstance(relay, dict):
             continue
         fp = fingerprint_of(relay.get("fingerprint"))
-        if not fp:
-            continue
-        by_fp[fp] = relay
-        contact = norm_contact(relay.get("contact"))
-        if contact:
-            by_contact[contact].add(fp)
-    return by_fp, by_contact
+        if fp:
+            by_fp[fp] = relay
+    return by_fp
 
 
-def _index_aroi(results, available):
-    """fingerprint -> validated domain, and domain -> fingerprints. Empty when unavailable."""
+def _index_aroi(results):
+    """fingerprint -> validated domain, and domain -> fingerprints, from aroivalidator rows
+    with valid == true (the validator's verdict is used as is)."""
     domain_of, by_domain = {}, defaultdict(set)
-    if not available:
-        return domain_of, by_domain
     for row in results or []:
         if not isinstance(row, dict) or row.get("valid") is not True:
             continue
@@ -594,46 +553,21 @@ def _index_aroi(results, available):
     return domain_of, by_domain
 
 
-def _operator_group(fp, by_fp, by_contact, aroi_domain, aroi_by_domain, aroi_available):
-    """Fingerprints in fp's operator group (family, AROI domain, or contact fallback)."""
-    fp = fingerprint_of(fp)
-    group = set()
-    relay = by_fp.get(fp)
-    if relay:
-        group.add(fp)
-        for member in relay.get("effective_family") or []:
-            member_fp = fingerprint_of(member)
-            if member_fp in by_fp:
-                group.add(member_fp)
-    domain = aroi_domain.get(fp) if aroi_available else None
-    if domain:
-        group |= aroi_by_domain.get(domain, set())
-    elif relay:
-        contact = norm_contact(relay.get("contact"))
-        if contact:
-            group |= by_contact.get(contact, set())
-    return group
+def _operator_group(fp, aroi_domain, aroi_by_domain):
+    """(validated domain, fingerprints validated for it) for fp, or (None, empty set)."""
+    domain = aroi_domain.get(fingerprint_of(fp))
+    return (domain, set(aroi_by_domain.get(domain, ()))) if domain else (None, set())
 
 
-def _group_footprint(members, by_fp, aroi_domain, use_contact):
-    """Addresses, IPv4 /24s, IPv6 /48s, domains and operator names of an operator group.
-
-    Validated AROI domains always count, and only they supply operator names. ContactInfo
-    url:/email: domains are unverified, so they count only when the exit itself has no
-    validated AROI domain (the contact fallback).
-    """
-    addrs, nets4, nets6, domains, names = set(), set(), set(), set(), set()
+def _group_footprint(domain, members, by_fp):
+    """Addresses, IPv4 /24s, IPv6 /48s, domains and operator names of an AROI operator group."""
+    addrs, nets4, nets6 = set(), set(), set()
+    domains = {domain} if domain else set()
+    names = {operator_name(domain)} - {""} if domain else set()
     for member in members:
-        domain = aroi_domain.get(member)
-        if domain:
-            domains.add(domain)
-            if operator_name(domain):
-                names.add(operator_name(domain))
         relay = by_fp.get(member)
         if not relay:
             continue
-        if use_contact:
-            domains |= contact_domains(relay.get("contact"))
         for addr in _relay_addresses(relay):
             addrs.add(addr)
             if addr.version == 4:
@@ -644,15 +578,15 @@ def _group_footprint(members, by_fp, aroi_domain, use_contact):
 
 
 def add_resolver_stats(report, rows, previous=None, ranges=None, origin=origin_asns, weights=None,
-                       relays=None, aroi=None, aroi_available=None, fcrdns=None):
+                       relays=None, aroi=None, fcrdns=None):
     """Add results[].resolver and metadata.resolvers (version 2) to report.
 
     rows are this scan's sampled analytics records. previous is one report or a
     newest-first list; carried query keys that are not version-2 categories (for
     example a legacy "local") are dropped. ranges, origin, relays, aroi and fcrdns
     override the live lookups so tests and a backfill can inject data. relays=None
-    fetches Onionoo and raises if it is unreachable. aroi=None fetches AROI; a failed
-    fetch continues with aroi_available false. fcrdns(ip) returns forward-confirmed
+    fetches Onionoo and aroi=None fetches the aroivalidator results; either raises if
+    unreachable. fcrdns(ip) returns forward-confirmed
     names. Raises, leaving report unchanged, when there is nothing to publish or the
     data looks broken.
     """
@@ -681,15 +615,10 @@ def add_resolver_stats(report, rows, previous=None, ranges=None, origin=origin_a
 
     if relays is None:
         relays = fetch_onionoo()
-    if aroi_available is None:
-        if aroi is None:
-            aroi = fetch_aroi()
-            aroi_available = aroi is not None
-        else:
-            aroi_available = True
-    aroi = aroi or []
-    relays_by_fp, relays_by_contact = _index_relays(relays)
-    aroi_domain, aroi_by_domain = _index_aroi(aroi, aroi_available)
+    if aroi is None:
+        aroi = fetch_aroi()
+    relays_by_fp = _index_relays(relays)
+    aroi_domain, aroi_by_domain = _index_aroi(aroi)
     if weights is None:
         weights = weights_from_relays(relays)
 
@@ -741,13 +670,10 @@ def add_resolver_stats(report, rows, previous=None, ranges=None, origin=origin_a
     def footprint(fp):
         """Cached operator-group addresses, prefixes and domains for one exit."""
         if fp not in footprints:
-            members = _operator_group(fp, relays_by_fp, relays_by_contact, aroi_domain,
-                                      aroi_by_domain, aroi_available)
-            use_contact = not (aroi_available and aroi_domain.get(fingerprint_of(fp)))
-            key = (tuple(sorted(members)), use_contact)
-            if key not in by_members:
-                by_members[key] = _group_footprint(members, relays_by_fp, aroi_domain, use_contact)
-            footprints[fp] = by_members[key]
+            domain, members = _operator_group(fp, aroi_domain, aroi_by_domain)
+            if domain not in by_members:
+                by_members[domain] = _group_footprint(domain, members, relays_by_fp)
+            footprints[fp] = by_members[domain]
         return footprints[fp]
 
     contexts = {}
@@ -910,7 +836,7 @@ def add_resolver_stats(report, rows, previous=None, ranges=None, origin=origin_a
         "thresholds": {"seen": SEEN, "label": LABEL}, "weighted": bool(weights),
         "exits_total": len(ok), "exits_covered": seen, "exits_labelled": labelled,
         "exits_using_public": using_public, "public_share_pct": public_pct, "share_pct": pct,
-        "operator_sources": {"onionoo": True, "aroi": bool(aroi_available)},
+        "operator_sources": {"onionoo": True, "aroi": True},
         "operator_signals": {"address": signals["address"], "prefix": signals["prefix"],
                              "fcrdns": signals["fcrdns"], "name": signals["name"]},
         "classification": {
@@ -920,11 +846,11 @@ def add_resolver_stats(report, rows, previous=None, ranges=None, origin=origin_a
             "local_24": "same IPv4 /24 or IPv6 /64 as the exit, including the exit's own address",
             "local_22": "same IPv4 /22 or IPv6 /48 as the exit, but not the same /24 or /64",
             "local_as": "same origin AS as the exit, outside its IPv4 /22 or IPv6 /48",
-            "local_operator": ("same operator (Onionoo effective_family, validated AROI domain, "
-                               "or identical ContactInfo) outside the exit's prefix and AS; "
-                               "matched by address, IPv4 /24 or IPv6 /48, forward-confirmed reverse DNS "
-                               "under an operator domain, or a forward-confirmed name carrying the "
-                               "operator's name from its validated AROI domain as a whole label"),
+            "local_operator": ("same operator outside the exit's prefix and AS; operator identity only "
+                               "from AROI validation (https://aroivalidator.1aeo.com/latest.json); matched "
+                               "by a relay address of the operator, its IPv4 /24 or IPv6 /48, a forward-"
+                               "confirmed reverse DNS name under the validated domain, or a forward-"
+                               "confirmed name carrying the operator's name from that domain as a label"),
             "unknown": "origin AS lookup failed"},
     }
     return report["metadata"]["resolvers"]

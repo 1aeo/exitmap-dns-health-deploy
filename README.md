@@ -78,13 +78,16 @@ Version 2 categories are the public providers `google`, `cloudflare`, `quad9`, `
 then `local_24` (same IPv4 /24 or IPv6 /64 as the exit, including its own address), `local_22`
 (same IPv4 /22 or IPv6 /48, outside that tighter prefix), `local_as` (same origin AS, outside those
 prefixes), `local_operator` (same operator, outside the exit's prefix and AS), plus `other` and
-`unknown`. `local_operator` uses the Onionoo effective family, a validated AROI domain, and — only
-when that domain is missing — an identical ContactInfo string. A resolver whose forward-confirmed
-hostname carries the operator's name from its validated AROI domain as a whole label (e.g.
-`artikel10.in-berlin.de` for `artikel10.org`; at least 5 characters, not a generic word) also counts
-as `local_operator`. `operator_signals` counts this scan's new estimated queries that matched by
-address, prefix, forward-confirmed reverse DNS under an operator domain, or operator name (not
-decayed, not weighted). Sampled rows are archived locally under `data/resolver_rows/`
+`unknown`. `local_operator` takes operator identity only from AROI validation as published by our
+aroivalidator (`https://aroivalidator.1aeo.com/latest.json`, rows with `valid: true`); it does not
+re-validate and does not use Tor family declarations, ContactInfo or Allium. Exits without a
+validated AROI domain are never `local_operator`. A resolver matches the operator by the address of
+a relay validated for the same domain, that address's IPv4 /24 or IPv6 /48, a forward-confirmed
+reverse DNS name under the validated domain, or a forward-confirmed name carrying the operator's
+name from that domain as a whole label (e.g. `artikel10.in-berlin.de` for `artikel10.org`; at least
+5 characters, not a generic word). If Onionoo or the AROI file is unreachable the step is skipped.
+`operator_signals` counts this scan's new estimated queries per matching rule (address, prefix,
+fcrdns, name; not decayed, not weighted). Sampled rows are archived locally under `data/resolver_rows/`
 (gitignored, not uploaded).
 
 ---
