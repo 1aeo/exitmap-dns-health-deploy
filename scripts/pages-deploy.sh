@@ -116,6 +116,11 @@ mkdir -p "$STATIC_DIR"
 cp -f "$DEPLOY_DIR/public/index.html" "$STATIC_DIR/"
 cp -f "$DEPLOY_DIR/public/app.js" "$STATIC_DIR/"
 cp -f "$DEPLOY_DIR/public/sitemap.xml" "$STATIC_DIR/"
+# Browsers may cache app.js for hours; index.html is revalidated on every load, so a
+# content-hash query on its script tag makes a new app.js take effect immediately.
+APP_HASH=$( (sha256sum "$STATIC_DIR/app.js" 2>/dev/null || shasum -a 256 "$STATIC_DIR/app.js") | cut -c1-12)
+sed -i.bak "s#<script src=\"app.js\"></script>#<script src=\"app.js?v=${APP_HASH}\"></script>#" "$STATIC_DIR/index.html" && rm -f "$STATIC_DIR/index.html.bak"
+grep -q "app.js?v=${APP_HASH}" "$STATIC_DIR/index.html" || log_warn "app.js cache-busting tag not found in index.html"
 
 # Copy functions
 mkdir -p "$STATIC_DIR/../functions"

@@ -254,14 +254,14 @@ async function loadStats() {
                     ${items.map(([lbl, v]) => `<div class="detail-item"><span class="detail-label">${lbl}:</span> <span class="detail-value">${v}</span></div>`).join('')}
                 </div>
             `;
-            // Version 2: the exit's own resolvers by distance, then the rest
+            // Version 2: the exit's own resolvers, split by distance from the exit
             const share = rs.share_pct || {};
             if (share.local_24 !== undefined) {
-                const local = [['/24', 'local_24'], ['/22', 'local_22'], ['AS', 'local_as'], ['Operator', 'local_operator'], ['Other (not local)', 'other'], ['Unknown network', 'unknown']]
+                const local = [['Local /24', 'local_24'], ['Local /22', 'local_22'], ['Local AS', 'local_as'], ['Local operator', 'local_operator']]
                     .map(([label, key]) => [label, pct(share[key])]);
                 html += `
                 <div class="details-row">
-                    <div class="detail-item"><span class="detail-label" style="color: var(--aeo-green); cursor: help;" title="Share of exit DNS lookups sent via the exit's own resolvers: same IPv4 /24 or IPv6 /64 as the exit (including its own address), same IPv4 /22 or IPv6 /48, same origin AS, or run by the same operator in another network. Other: any other resolver. Unknown: its network could not be looked up.">🏠 Local DNS resolvers:</span></div>
+                    <div class="detail-item"><span class="detail-label" style="color: var(--aeo-green); cursor: help;" title="Estimated share of exit DNS lookups (weighted by exit probability) sent via the exit's own resolvers. Each lookup counts in the first tier it matches. Local /24: same IPv4 /24 or IPv6 /64 as the exit, including its own address. Local /22: same IPv4 /22 or IPv6 /48, but not the same /24 or /64. Local AS: same origin AS, outside those prefixes. Local operator: run by the same AROI-validated operator, outside the exit's prefix and AS.">🏠 Local DNS resolvers:</span></div>
                     ${local.map(([lbl, v]) => `<div class="detail-item"><span class="detail-label">${lbl}:</span> <span class="detail-value">${v}</span></div>`).join('')}
                 </div>
             `;
