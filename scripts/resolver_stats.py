@@ -198,10 +198,21 @@ def published_ranges():
 
 
 def fetch_json(url, timeout):
-    """GET url and parse a JSON body. No Authorization header is sent."""
+    """GET url and parse a JSON body. No Authorization header is sent.
+
+    Redirects are refused, same as the GraphQL client. These calls carry no
+    credentials; refusing a 3xx keeps a directory host from sending the cron
+    job to some other URL.
+    """
     req = urllib.request.Request(url, headers={"User-Agent": "exitdnshealth-resolver-stats"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.load(resp)
+    try:
+        with GRAPHQL_OPENER.open(req, timeout=timeout) as resp:
+            return json.load(resp)
+    except urllib.error.HTTPError as exc:
+        if 300 <= exc.code < 400:
+            host = urllib.parse.urlparse(url).hostname or "directory host"
+            raise RuntimeError(f"refusing redirect from {host}") from None
+        raise
 
 
 def fetch_onionoo():

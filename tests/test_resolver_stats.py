@@ -620,6 +620,32 @@ class TestLookups(unittest.TestCase):
             r = published_ranges()                       # Google from the TXT record, Cloudflare snapshot
         self.assertEqual((len(r["google"]), len(r["cloudflare"])), (120, len(resolver_stats.CLOUDFLARE_SNAPSHOT)))
 
+    def test_directory_fetch_refuses_redirects(self):
+        """Onionoo and AROI fetches do not follow a 3xx."""
+        import http.server
+        import threading
+
+        class Redirect(http.server.BaseHTTPRequestHandler):
+            """Answers with a 302 and no body."""
+
+            def do_GET(self):
+                """Redirect."""
+                self.send_response(302)
+                self.send_header("Location", "http://127.0.0.1/other")
+                self.end_headers()
+
+            def log_message(self, *args):
+                """Quiet."""
+
+        origin = http.server.HTTPServer(("127.0.0.1", 0), Redirect)
+        threading.Thread(target=origin.serve_forever, daemon=True).start()
+        try:
+            with self.assertRaises(RuntimeError) as ctx:
+                resolver_stats.fetch_json(f"http://127.0.0.1:{origin.server_port}/details", timeout=5)
+            self.assertIn("refusing redirect", str(ctx.exception))
+        finally:
+            origin.shutdown()
+
     def test_fcrdns_keeps_only_forward_confirmed_names(self):
         """A PTR counts only when its A/AAAA record contains the resolver address."""
         state = {"forward": "192.0.2.50"}
