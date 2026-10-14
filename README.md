@@ -78,10 +78,22 @@ Version 2 categories are the public providers `google`, `cloudflare`, `quad9`, `
 then `local_24` (same IPv4 /24 or IPv6 /64 as the exit, including its own address), `local_22`
 (same IPv4 /22 or IPv6 /48, outside that tighter prefix), `local_as` (same origin AS, outside those
 prefixes), `local_operator` (same operator, outside the exit's prefix and AS), plus `other` and
-`unknown`. `local_operator` uses the Onionoo effective family, a validated AROI domain, and — only
-when that domain is missing — an identical ContactInfo string. `operator_signals` counts this
-scan's new estimated queries that matched by address, prefix, or forward-confirmed reverse DNS
-(not decayed, not weighted). Sampled rows are archived locally under `data/resolver_rows/`
+`unknown`. `local_operator` takes operator identity only from AROI validation as published by our
+aroivalidator (`https://aroivalidator.1aeo.com/latest.json`, rows with `valid: true`); it does not
+re-validate and does not use Tor family declarations, ContactInfo or Allium. Exits without a
+validated AROI domain are never `local_operator`. A resolver matches the operator by the address of
+a relay validated for the same domain, that address's IPv4 /24 or IPv6 /48, a forward-confirmed
+reverse DNS name under the validated domain, or a forward-confirmed name registered in the
+operator's name, i.e. whose registrable label under the [Public Suffix List](https://publicsuffix.org/list/)
+equals that of the validated domain (e.g. `artikel10.in-berlin.de` for `artikel10.org`, as
+`in-berlin.de` is a public suffix; the name must be at least 5 characters, not all digits and not a
+generic word). Unlike the other three, this rule can be met by anyone who registers that name under
+some public suffix. The list is cached in `data/` and fetched at most once a day; without it the
+name rule is off (`operator_sources.public_suffix_list` is false). If Onionoo or the AROI file is
+unreachable the step is skipped. `operator_signals` counts this scan's new estimated queries per
+matching rule (address, prefix, fcrdns, name; not decayed, not weighted). Reports made this way carry
+`operator_identity: "aroi"`; `local_operator` counts are carried forward only from such reports
+(earlier version-2 reports also used Tor family and ContactInfo). Sampled rows are archived locally under `data/resolver_rows/`
 (gitignored, not uploaded).
 
 ---

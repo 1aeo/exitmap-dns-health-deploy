@@ -28,6 +28,10 @@ FP_A, FP_B, FP_C, FP_D = ("AAAAAAAA" + "1" * 32, "BBBBBBBB" + "2" * 32,
 RANGES = {"google": [ipaddress.ip_network("8.8.8.0/24"), ipaddress.ip_network("2001:4860::/32")],
           "cloudflare": [ipaddress.ip_network("172.64.0.0/13"), ipaddress.ip_network("203.0.113.0/24")],
           "ffmuc": [ipaddress.ip_network("5.1.66.0/24")]}
+# A slice of the Public Suffix List (https://publicsuffix.org/list/public_suffix_list.dat).
+SUFFIXES = frozenset({"com", "net", "org", "de", "se", "uk", "co.uk", "jp", "tokyo.jp", "*.kawasaki.jp",
+                      "!city.kawasaki.jp", "pl", "warszawa.pl", "eu", "ddnss.eu", "dyndns.org", "hopto.org",
+                      "in-berlin.de", "test", "example", "cn", "xn--55qx5d.cn"})
 ORIGINS = {"192.0.2.10": {64500}, "192.0.2.99": {64500}, "203.0.113.5": {64501},
            "74.63.16.1": {42}, "35.192.0.1": {396982}}  # anything else: lookup failed
 
@@ -62,11 +66,11 @@ WEIGHTS = {FP_A: 0.3, FP_B: 0.1, FP_D: 0.6}
 
 
 def run(report, rows=ROWS, previous=None, weights=WEIGHTS, origins=ORIGINS, relays=(),
-        aroi=(), aroi_available=True, fcrdns=None):
-    """add_resolver_stats with fixed ranges, AS data and exit weights (no network)."""
+        aroi=(), fcrdns=None, suffixes=SUFFIXES):
+    """add_resolver_stats with fixed ranges, AS data, exit weights and suffix rules (no network)."""
     return add_resolver_stats(report, rows, previous, ranges=RANGES, origin=origins.get, weights=weights,
-                              relays=list(relays), aroi=list(aroi), aroi_available=aroi_available,
-                              fcrdns=fcrdns or (lambda ip: set()))
+                              relays=list(relays), aroi=list(aroi),
+                              fcrdns=fcrdns or (lambda ip: set()), suffixes=suffixes)
 
 
 class TestResolverStats(unittest.TestCase):
@@ -100,7 +104,7 @@ class TestResolverStats(unittest.TestCase):
                                           "ffmuc": 0.0, "local_24": 0.0, "local_22": 0.0, "local_as": 0.0,
                                           "local_operator": 0.0, "other": 18.75, "unknown": 12.5})
         self.assertNotIn("local", s["share_pct"])
-        self.assertEqual(s["operator_sources"], {"onionoo": True, "aroi": True})
+        self.assertEqual(s["operator_sources"], {"onionoo": True, "aroi": True, "public_suffix_list": True})
         self.assertEqual(s["window"], {"start": "2026-10-11T19:00:19Z", "end": "2026-10-11T19:27:04Z"})
 
     def test_unweighted_fallback(self):
@@ -318,7 +322,7 @@ class TestLocalTiers(unittest.TestCase):
         self.assertEqual(report["results"][0]["resolver"]["queries"], {"local_24": 70})
 
     def test_operator_by_address_prefix_and_confirmed_name(self):
-        """Family address, footprint /24 and /48, and FCrDNS match; a same-AS hit stays local_as."""
+        """Group relay address, footprint /24 and /48, and FCrDNS match; a same-AS hit stays local_as."""
         contact = "email:ops[]example.net url:https://www.example.net/exit"
         family = ["$" + FP_A, FP_B, FP_C, FP_D]
         relays = [
@@ -326,27 +330,26 @@ class TestLocalTiers(unittest.TestCase):
             _relay(FP_B, ["10.8.8.8:9001"], family=family),
             _relay(FP_C, ["10.7.7.8:9001", "[2001:db8:abcd::1]:9001"], family=family),
         ]
-        aroi = [{"fingerprint": FP_A, "valid": True, "domain": "Example.NET"},
-                {"fingerprint": FP_D, "valid": False, "domain": "example.net"}]
+        aroi = [{"fingerprint": fp, "valid": True, "domain": "Example.NET"} for fp in (FP_A, FP_B, FP_C, FP_D)]
         origins = {"198.51.100.10": {50}, "10.8.8.8": {77}, "10.7.7.9": {77}, "10.1.2.3": {50},
                    "192.0.2.50": {77}, "192.0.2.51": {77}, "2001:db8:abcd:99::5": {77}}
         confirmed = {"192.0.2.50": {"dns.example.net"}, "192.0.2.51": set(),
                      "10.8.8.8": set(), "10.7.7.9": set(), "10.1.2.3": set(), "2001:db8:abcd:99::5": set()}
         rows = [row("u.aaaaaaaa.tor.exit.validator.1aeo.com", ip) for ip in
                 ("10.8.8.8", "10.7.7.9", "2001:db8:abcd:99::5", "192.0.2.50", "192.0.2.51", "10.1.2.3")]
-        # 10.1.2.3 shares the exit's AS, so it is local_as even though a family relay could sit there.
+        # 10.1.2.3 shares the exit's AS, so it is local_as even though a group relay sits there.
         relays.append(_relay(FP_D, ["10.1.2.3:9001"], family=family))
         report = _exit_report(FP_A, "198.51.100.10")
         summary = run(report, rows=rows, origins=origins, weights={}, relays=relays, aroi=aroi,
                       fcrdns=confirmed.get)
         queries = report["results"][0]["resolver"]["queries"]
         self.assertEqual(queries, {"local_as": 10, "local_operator": 40, "other": 10})
-        self.assertEqual(summary["operator_signals"], {"address": 10, "prefix": 20, "fcrdns": 10})
+        self.assertEqual(summary["operator_signals"], {"address": 10, "prefix": 20, "fcrdns": 10, "name": 0})
         self.assertEqual((report["results"][0]["resolver"]["primary"],
                           report["results"][0]["resolver"]["public"]), ("local_operator", False))
 
-    def test_aroi_groups_operators_and_contact_is_only_a_fallback(self):
-        """A shared validated domain groups relays; the same contact does not when a domain exists."""
+    def test_aroi_domain_alone_defines_the_operator_group(self):
+        """Relays validated for the exit's domain form the group; shared ContactInfo does not."""
         contact = "email:ops[]example.net"
         relays = [
             _relay(FP_A, ["198.51.100.10:9001"], contact=contact),
@@ -360,48 +363,46 @@ class TestLocalTiers(unittest.TestCase):
         rows = [row("u.aaaaaaaa.tor.exit.validator.1aeo.com", ip) for ip in ("10.4.4.4", "10.6.6.6")]
         report = _exit_report(FP_A, "198.51.100.10")
         run(report, rows=rows, origins=origins, weights={}, relays=relays, aroi=aroi)
-        # B shares the AROI domain. C only shares contact text, which is not used once AROI matched.
         self.assertEqual(report["results"][0]["resolver"]["queries"], {"local_operator": 10, "other": 10})
 
-    def test_contact_fallback_when_aroi_has_no_domain_for_the_exit(self):
-        """Identical normalized ContactInfo groups relays that have no validated AROI domain."""
+    def test_no_operator_group_without_a_validated_domain(self):
+        """Without a validated AROI domain, Tor family and identical ContactInfo do not make an operator."""
+        family = [FP_A, FP_B]
         relays = [
-            _relay(FP_A, ["198.51.100.10:9001"], contact="Email:  Ops []  Example.NET"),
-            _relay(FP_B, ["10.5.5.5:9001"], contact="email: ops [] example.net"),
+            _relay(FP_A, ["198.51.100.10:9001"], family=family, contact="email:ops[]example.net"),
+            _relay(FP_B, ["10.5.5.5:9001"], family=family, contact="email:ops[]example.net"),
         ]
         origins = {"198.51.100.10": {50}, "10.5.5.5": {77}}
-        report = _exit_report(FP_A, "198.51.100.10")
-        run(report, rows=[row("u.aaaaaaaa.tor.exit.validator.1aeo.com", "10.5.5.5")],
-            origins=origins, weights={}, relays=relays, aroi=[])
-        self.assertEqual(report["results"][0]["resolver"]["queries"], {"local_operator": 10})
-        self.assertEqual(resolver_stats.contact_domains("email:ops[]Example.NET url:https://www.Example.NET/a"),
-                         {"example.net"})
+        for aroi in ([], [{"fingerprint": FP_A, "valid": False, "domain": "example.net"},
+                          {"fingerprint": FP_B, "valid": True, "domain": "example.net"}]):
+            report = _exit_report(FP_A, "198.51.100.10")
+            run(report, rows=[row("u.aaaaaaaa.tor.exit.validator.1aeo.com", "10.5.5.5")],
+                origins=origins, weights={}, relays=relays, aroi=aroi)
+            self.assertEqual(report["results"][0]["resolver"]["queries"], {"other": 10})
 
-    def test_aroi_outage_continues_and_onionoo_outage_leaves_the_report(self):
-        """AROI failing omits that source; Onionoo failing raises and does not publish."""
-        relays = [
-            _relay(FP_A, ["198.51.100.10:9001"], contact="email:ops[]example.net"),
-            _relay(FP_B, ["10.5.5.5:9001"], contact="email:ops[]example.net"),
-        ]
-        origins = {"198.51.100.10": {50}, "10.5.5.5": {77}}
-        report = _exit_report(FP_A, "198.51.100.10")
-        with mock.patch.object(resolver_stats, "fetch_aroi", return_value=None):
-            summary = add_resolver_stats(
-                report, [row("u.aaaaaaaa.tor.exit.validator.1aeo.com", "10.5.5.5")],
-                ranges=RANGES, origin=origins.get, weights={}, relays=relays, fcrdns=lambda ip: set())
-        self.assertEqual(summary["operator_sources"], {"onionoo": True, "aroi": False})
-        self.assertEqual(summary["version"], 2)
-        self.assertEqual(report["results"][0]["resolver"]["queries"], {"local_operator": 10})
+    def test_aroi_or_onionoo_outage_leaves_the_report(self):
+        """Operator identity needs AROI and addresses need Onionoo: either failing raises, nothing is published."""
+        for fetcher in ("fetch_aroi", "fetch_onionoo"):
+            untouched = make_report()
+            with mock.patch.object(resolver_stats, fetcher, side_effect=RuntimeError("down")):
+                with self.assertRaises(RuntimeError):
+                    add_resolver_stats(untouched, ROWS, ranges=RANGES, origin=ORIGINS.get, weights=WEIGHTS,
+                                       relays=None if fetcher == "fetch_onionoo" else [],
+                                       aroi=None if fetcher == "fetch_aroi" else [], fcrdns=lambda ip: set(),
+                                       suffixes=SUFFIXES)
+            self.assertEqual(untouched, make_report())
 
-        untouched = make_report()
-        with mock.patch.object(resolver_stats, "fetch_onionoo", side_effect=RuntimeError("down")):
+    def test_fetch_aroi_retries_then_raises(self):
+        """A malformed or unreachable aroivalidator file is retried, then raises."""
+        with mock.patch.object(resolver_stats, "fetch_json", return_value={"results": "nope"}), \
+             mock.patch.object(resolver_stats.time, "sleep"):
             with self.assertRaises(RuntimeError):
-                add_resolver_stats(untouched, ROWS, ranges=RANGES, origin=ORIGINS.get, weights=WEIGHTS,
-                                   fcrdns=lambda ip: set())
-        self.assertEqual(untouched, make_report())
+                resolver_stats.fetch_aroi()
+        with mock.patch.object(resolver_stats, "fetch_json", return_value={"results": []}):
+            self.assertEqual(resolver_stats.fetch_aroi(), [])
 
-    def test_confirmed_name_must_sit_under_the_operator_domain(self):
-        """A PTR like artikel10.in-berlin.de does not match the AROI domain artikel10.org."""
+    def test_operator_name_matches_a_resolver_registered_at_its_hoster(self):
+        """artikel10.in-berlin.de is not under artikel10.org, but is registered in the operator's name."""
         self.assertTrue(resolver_stats.name_in_domain("dns.dotsrc.org", "dotsrc.org"))
         self.assertTrue(resolver_stats.name_in_domain("dotsrc.org", "dotsrc.org"))
         self.assertFalse(resolver_stats.name_in_domain("artikel10.in-berlin.de", "artikel10.org"))
@@ -413,13 +414,166 @@ class TestLocalTiers(unittest.TestCase):
         run(report, rows=[row("u.aaaaaaaa.tor.exit.validator.1aeo.com", "217.197.91.153")],
             origins=origins, weights={}, relays=relays, aroi=aroi,
             fcrdns=lambda ip: {"artikel10.in-berlin.de"} if ip == "217.197.91.153" else set())
-        self.assertEqual(report["results"][0]["resolver"]["queries"], {"other": 10})
+        self.assertEqual(report["results"][0]["resolver"]["queries"], {"local_operator": 10})
+        self.assertEqual(report["metadata"]["resolvers"]["operator_signals"]["name"], 10)
+        self.assertTrue(report["metadata"]["resolvers"]["operator_sources"]["public_suffix_list"])
 
-    def test_non_string_contact_and_aroi_domain_do_not_abort(self):
-        """A non-string ContactInfo or AROI domain is ignored and classification still finishes."""
+    def test_operator_name_rule_stays_narrow(self):
+        """No match from unverified ContactInfo, partial labels, names in someone else's zone, generic
+        or short names, unconfirmed PTRs, or without the suffix list."""
+        origins = {"198.51.100.10": {60729}, "217.197.91.153": {29670}}
+
+        def queries(aroi, contact="", ptr="artikel10.in-berlin.de", suffixes=SUFFIXES):
+            """Classify one row from 217.197.91.153 whose confirmed name is ptr."""
+            report = _exit_report(FP_A, "198.51.100.10")
+            run(report, rows=[row("u.aaaaaaaa.tor.exit.validator.1aeo.com", "217.197.91.153")],
+                origins=origins, weights={}, relays=[_relay(FP_A, ["198.51.100.10:9001"], contact=contact)],
+                aroi=aroi, fcrdns=lambda ip: {ptr} if ptr and ip == "217.197.91.153" else set(),
+                suffixes=suffixes)
+            return report["results"][0]["resolver"]["queries"]
+        valid = [{"fingerprint": FP_A, "valid": True, "domain": "artikel10.org"}]
+        self.assertEqual(queries(valid, ptr="dns.artikel10.net"), {"local_operator": 10})  # registered name
+        self.assertEqual(queries([], contact="url:https://artikel10.org"), {"other": 10})   # unverified contact
+        self.assertEqual(queries([dict(valid[0], valid=False)]), {"other": 10})            # invalid AROI row
+        self.assertEqual(queries(valid, ptr="artikel10x.in-berlin.de"), {"other": 10})      # partial label
+        self.assertEqual(queries(valid, ptr="artikel10.attacker.test"), {"other": 10})      # someone else's zone
+        self.assertEqual(queries(valid, ptr="artikel10.org.attacker.test"), {"other": 10})
+        self.assertEqual(queries(valid, ptr=""), {"other": 10})                            # not forward-confirmed
+        self.assertEqual(queries(valid, suffixes=frozenset()), {"other": 10})              # no suffix list
+        self.assertEqual(queries([{"fingerprint": FP_A, "valid": True, "domain": "relay.example"}],
+                                 ptr="relay.in-berlin.de"), {"other": 10})                  # generic name
+        self.assertEqual(queries([{"fingerprint": FP_A, "valid": True, "domain": "dfri.se"}],
+                                 ptr="dfri.in-berlin.de"), {"other": 10})                   # shorter than NAME_MIN
+
+    def test_operator_name_from_domain(self):
+        """The registrable label; empty for short, numeric or generic names, or without suffix rules."""
+        name = resolver_stats.operator_name
+        self.assertEqual(name("artikel10.org", SUFFIXES), "artikel10")
+        self.assertEqual(name("relays.Zwiebelnet.ORG.", SUFFIXES), "zwiebelnet")
+        self.assertEqual(name("www.applied-privacy.net", SUFFIXES), "applied-privacy")
+        self.assertEqual(name("torrelays.co.uk", SUFFIXES), "torrelays")
+        self.assertEqual(name("relays.zwiebel.tokyo.jp", SUFFIXES), "zwiebel")
+        self.assertEqual(name("someone.dyndns.org", SUFFIXES), "someone")  # the user's name, not the platform's
+        self.assertEqual(name("bundesgebaermutter.ddnss.eu", SUFFIXES), "bundesgebaermutter")
+        for domain in ("dfri.se", "12345.net", "relay.net", "privacy.org", "localhost", "", None,
+                       "relays.example.tokyo.jp", "x.warszawa.pl", "dyndns.org", "in-berlin.de",
+                       "host.amazonaws.com"):
+            self.assertEqual(name(domain, SUFFIXES), "", domain)
+        self.assertEqual(name("artikel10.org", frozenset()), "")
+
+    def test_idn_domain_and_punycode_ptr_compare_equal(self):
+        """A Unicode AROI domain and the punycode PTR of a resolver at its hoster give the same name."""
+        self.assertEqual(resolver_stats.operator_name("bücher.org", SUFFIXES), "xn--bcher-kva")
+        self.assertEqual(resolver_stats.registrable_label("xn--bcher-kva.in-berlin.de", SUFFIXES), "xn--bcher-kva")
+        self.assertEqual(resolver_stats.operator_name("bü.org", SUFFIXES), "")  # NAME_MIN counts "bü", not "xn--b-eha"
+        relays = [_relay(FP_A, ["198.51.100.10:9001"])]
+        report = _exit_report(FP_A, "198.51.100.10")
+        run(report, rows=[row("u.aaaaaaaa.tor.exit.validator.1aeo.com", "217.197.91.153")],
+            origins={"198.51.100.10": {60729}, "217.197.91.153": {29670}}, weights={}, relays=relays,
+            aroi=[{"fingerprint": FP_A, "valid": True, "domain": "Bücher.org"}],
+            fcrdns=lambda ip: {"xn--bcher-kva.in-berlin.de"})
+        self.assertEqual(report["results"][0]["resolver"]["queries"], {"local_operator": 10})
+
+    def test_unicode_and_punycode_aroi_spellings_form_one_group(self):
+        """Relays validated as bücher.org and xn--bcher-kva.org are one operator; PTRs match either spelling."""
         relays = [_relay(FP_A, ["198.51.100.10:9001"]), _relay(FP_B, ["10.5.5.5:9001"])]
-        relays[0]["contact"] = {"email": "ops@example.net"}
-        relays[1]["contact"] = ["email:ops[]example.net"]
+        aroi = [{"fingerprint": FP_A, "valid": True, "domain": "bücher.org"},
+                {"fingerprint": FP_B, "valid": True, "domain": "XN--BCHER-KVA.org"}]
+        origins = {"198.51.100.10": {50}, "10.5.5.5": {77}, "10.9.9.9": {78}}
+        report = _exit_report(FP_A, "198.51.100.10")
+        run(report, rows=[row("u.aaaaaaaa.tor.exit.validator.1aeo.com", "10.5.5.5"),
+                          row("v.aaaaaaaa.tor.exit.validator.1aeo.com", "10.9.9.9")],
+            origins=origins, weights={}, relays=relays, aroi=aroi,
+            fcrdns=lambda ip: {"ns.xn--bcher-kva.org"} if ip == "10.9.9.9" else set())
+        self.assertEqual(report["results"][0]["resolver"]["queries"], {"local_operator": 20})
+        self.assertEqual(report["metadata"]["resolvers"]["operator_signals"],
+                         {"address": 10, "prefix": 0, "fcrdns": 10, "name": 0})
+
+    def test_punycode_keeps_distinct_names_distinct(self):
+        """straße.de and xn--strae-oqa.de are one name, strasse.de another; compatibility forms are rejected."""
+        puny = resolver_stats._punycode
+        self.assertEqual(puny("Straße.DE."), "xn--strae-oqa.de")
+        self.assertEqual(puny("xn--strae-oqa.de"), "xn--strae-oqa.de")
+        self.assertEqual(puny("strasse.de"), "strasse.de")
+        self.assertEqual(puny("公司.cn"), "xn--55qx5d.cn")
+        self.assertEqual(puny("ｅxample.org"), "")  # fullwidth: IDNA 2008 maps or rejects it
+        domain_of, by_domain = resolver_stats._index_aroi([
+            {"fingerprint": FP_A, "valid": True, "domain": "straße.de"},
+            {"fingerprint": FP_B, "valid": True, "domain": "xn--strae-oqa.de"},
+            {"fingerprint": FP_C, "valid": True, "domain": "strasse.de"},
+            {"fingerprint": FP_D, "valid": True, "domain": "ｅxample.org"}])
+        self.assertEqual(dict(by_domain), {"xn--strae-oqa.de": {FP_A, FP_B}, "strasse.de": {FP_C}})
+        self.assertEqual(resolver_stats.operator_name("straße.de", SUFFIXES), "xn--strae-oqa")
+
+    def test_local_operator_counts_carry_only_from_aroi_identity_reports(self):
+        """Earlier v2 reports (operators also from family/ContactInfo) do not carry local_operator."""
+        relays = [_relay(FP_A, ["198.51.100.10:9001"])]
+        origins = {"198.51.100.10": {60729}, "10.5.5.5": {77}}
+
+        def previous(identity):
+            """A report one half-life older with 100 local_operator and 40 local_24 queries for A."""
+            prev = _exit_report(FP_A, "198.51.100.10")
+            prev["metadata"]["timestamp"] = "2026-10-08T07:26:08Z"
+            prev["metadata"]["resolvers"] = {"version": 2}
+            if identity:
+                prev["metadata"]["resolvers"]["operator_identity"] = identity
+            prev["results"][0]["resolver"] = {"queries": {"local_operator": 100, "local_24": 40}}
+            return prev
+        for identity, expected in ((None, {"local_24": 20.0, "other": 10}),
+                                   ("aroi", {"local_24": 20.0, "local_operator": 50.0, "other": 10})):
+            report = _exit_report(FP_A, "198.51.100.10")
+            run(report, rows=[row("u.aaaaaaaa.tor.exit.validator.1aeo.com", "10.5.5.5")], previous=previous(identity),
+                origins=origins, weights={}, relays=relays)
+            self.assertEqual(report["results"][0]["resolver"]["queries"], expected, identity)
+            self.assertEqual(report["metadata"]["resolvers"]["operator_identity"], "aroi")
+
+    def test_registrable_label_follows_the_public_suffix_algorithm(self):
+        """Longest rule wins, wildcards and exceptions apply, unlisted TLDs use the default rule."""
+        label = resolver_stats.registrable_label
+        self.assertEqual(label("artikel10.in-berlin.de", SUFFIXES), "artikel10")
+        self.assertEqual(label("a.b.artikel10.in-berlin.de.", SUFFIXES), "artikel10")
+        self.assertEqual(label("www.foo.co.uk", SUFFIXES), "foo")
+        self.assertEqual(label("www.foo.bar.kawasaki.jp", SUFFIXES), "foo")       # *.kawasaki.jp
+        self.assertEqual(label("www.city.kawasaki.jp", SUFFIXES), "city")         # !city.kawasaki.jp
+        self.assertEqual(label("host.foo.unlisted", SUFFIXES), "foo")             # default rule "*"
+        self.assertEqual(label("xn--55qx5d.cn", SUFFIXES), "")                    # a suffix itself
+        self.assertEqual(label("host.foo.xn--55qx5d.cn", SUFFIXES), "foo")
+        for bad in ("co.uk", "in-berlin.de", "org", "", None, "a..org"):
+            self.assertEqual(label(bad, SUFFIXES), "", bad)
+
+    def test_parse_suffixes_reads_rules_and_skips_comments(self):
+        """Rules end at whitespace, comments and blank lines are skipped, IDN rules become ASCII."""
+        text = "// ===BEGIN ICANN DOMAINS===\n\nCO.uk extra\n*.kawasaki.jp\n!city.kawasaki.jp\n公司.cn\n// x\n"
+        self.assertEqual(resolver_stats.parse_suffixes(text),
+                         {"co.uk", "*.kawasaki.jp", "!city.kawasaki.jp", "xn--55qx5d.cn"})
+
+    def test_public_suffixes_cache_once_a_day_with_stale_fallback(self):
+        """Fetched at most once a day; a failed fetch uses a cached copy up to 30 days old, else no rules."""
+        good = "// ===BEGIN ICANN DOMAINS===\norg\n// ===BEGIN PRIVATE DOMAINS===\nin-berlin.de\n"
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"DEPLOY_DIR": tmp}):
+            path = os.path.join(tmp, "data", "public_suffix_list.dat")
+            with mock.patch.object(resolver_stats, "fetch_text", side_effect=OSError("down")):
+                self.assertEqual(resolver_stats.public_suffixes(), frozenset())        # nothing cached
+            with mock.patch.object(resolver_stats, "fetch_text", return_value="<html>captive portal</html>"):
+                self.assertEqual(resolver_stats.public_suffixes(), frozenset())        # not the list
+            self.assertFalse(os.path.exists(path))
+            with mock.patch.object(resolver_stats, "fetch_text", return_value=good) as fetch:
+                self.assertEqual(resolver_stats.public_suffixes(), {"org", "in-berlin.de"})
+                self.assertEqual(resolver_stats.public_suffixes(), {"org", "in-berlin.de"})
+                self.assertEqual(fetch.call_count, 1)                                  # second call: cache
+            two_days_ago = os.path.getmtime(path) - 2 * 86400
+            os.utime(path, (two_days_ago, two_days_ago))
+            with mock.patch.object(resolver_stats, "fetch_text", side_effect=OSError("down")) as fetch:
+                self.assertEqual(resolver_stats.public_suffixes(), {"org", "in-berlin.de"})  # stale copy
+                self.assertEqual(fetch.call_count, 1)
+            old = os.path.getmtime(path) - 40 * 86400
+            os.utime(path, (old, old))
+            with mock.patch.object(resolver_stats, "fetch_text", side_effect=OSError("down")):
+                self.assertEqual(resolver_stats.public_suffixes(), frozenset())        # too old
+
+    def test_non_string_aroi_domain_is_ignored(self):
+        """A non-string AROI domain is skipped and classification still finishes."""
+        relays = [_relay(FP_A, ["198.51.100.10:9001"]), _relay(FP_B, ["10.5.5.5:9001"])]
         aroi = [{"fingerprint": FP_A, "valid": True, "domain": {"name": "example.net"}},
                 {"fingerprint": FP_B, "valid": True, "domain": 12}]
         origins = {"198.51.100.10": {50}, "10.5.5.5": {77}}
@@ -428,8 +582,6 @@ class TestLocalTiers(unittest.TestCase):
                       origins=origins, weights={}, relays=relays, aroi=aroi)
         self.assertEqual(report["results"][0]["resolver"]["queries"], {"other": 10})
         self.assertEqual(summary["version"], 2)
-        self.assertEqual(resolver_stats.norm_contact({"email": "x"}), "")
-        self.assertEqual(resolver_stats.contact_domains(["url:https://example.net"]), set())
 
     def test_legacy_only_resolver_block_is_removed_when_nothing_remains(self):
         """An in-place re-run drops a resolver block that contained only legacy keys."""
@@ -503,38 +655,30 @@ class TestLocalTiers(unittest.TestCase):
         self.assertEqual(resolver_stats.primary_of({"local_24": 10, "google": 5}), None)    # below LABEL
 
     def test_operator_is_checked_before_unknown(self):
-        """A family relay address is local_operator even when its own origin-AS lookup fails."""
-        contact = "url:https://ops.example"
-        relays = [_relay(FP_A, ["198.51.100.10:9001"], contact=contact),
-                  _relay(FP_B, ["198.18.0.77:9001"], contact=contact)]
+        """A group relay address is local_operator even when its own origin-AS lookup fails."""
+        relays = [_relay(FP_A, ["198.51.100.10:9001"]), _relay(FP_B, ["198.18.0.77:9001"])]
+        aroi = [{"fingerprint": fp, "valid": True, "domain": "ops-net.example"} for fp in (FP_A, FP_B)]
         rows = [row("u.aaaaaaaa.tor.exit.validator.1aeo.com", "198.18.0.77")] * 3 + \
                [row("u.aaaaaaaa.tor.exit.validator.1aeo.com", "198.51.100.10")] * 4
         report = _exit_report(FP_A, "198.51.100.10")
-        run(report, rows=rows, origins={"198.51.100.10": {50}}, weights={}, relays=relays)
+        run(report, rows=rows, origins={"198.51.100.10": {50}}, weights={}, relays=relays, aroi=aroi)
         self.assertEqual(report["results"][0]["resolver"]["queries"], {"local_24": 40, "local_operator": 30})
 
-    def test_contact_domains_count_only_without_a_validated_aroi_domain(self):
-        """With a validated AROI domain, a group member's unverified ContactInfo domain is not an operator domain."""
-        relays = [_relay(FP_A, ["198.51.100.10:9001"], family=[FP_A, FP_B], contact="url:https://ops.example"),
-                  _relay(FP_B, ["198.51.100.200:9001"], family=[FP_A, FP_B], contact="url:https://unrelated.example")]
+    def test_contact_domains_never_name_the_operator(self):
+        """A resolver confirmed under a ContactInfo domain is not local_operator, with or without AROI."""
+        relays = [_relay(FP_A, ["198.51.100.10:9001"], contact="url:https://ops.example"),
+                  _relay(FP_B, ["198.51.100.200:9001"], contact="url:https://unrelated.example")]
         rows = [row("u.aaaaaaaa.tor.exit.validator.1aeo.com", "192.0.2.50")] * 3
         origins = {"192.0.2.50": {77}, "198.51.100.10": {50}}
 
         def names(ip):
-            """192.0.2.50 forward-confirms under the member's unrelated contact domain."""
-            return {"dns.unrelated.example"} if ip == "192.0.2.50" else set()
-        aroi = [{"fingerprint": FP_A, "valid": True, "domain": "ops.example"}]
-        report = _exit_report(FP_A, "198.51.100.10")
-        run(report, rows=rows, origins=origins, weights={}, relays=relays, aroi=aroi, fcrdns=names)
-        self.assertEqual(report["results"][0]["resolver"]["queries"], {"other": 30})
-        report = _exit_report(FP_A, "198.51.100.10")                 # no AROI domain: contact fallback
-        run(report, rows=rows, origins=origins, weights={}, relays=relays, aroi=[], fcrdns=names)
-        self.assertEqual(report["results"][0]["resolver"]["queries"], {"local_operator": 30})
-
-    def test_malformed_contact_url_does_not_abort(self):
-        """Unbalanced brackets in operator-supplied url: values are skipped, not raised."""
-        self.assertEqual(resolver_stats.contact_domains("url:http://[x"), set())
-        self.assertEqual(resolver_stats.contact_domains("url:http://[x url:https://www.ok.example/a"), {"ok.example"})
+            """192.0.2.50 forward-confirms under the contact domains."""
+            return {"dns.unrelated.example", "dns.ops.example"} if ip == "192.0.2.50" else set()
+        for aroi in ([], [{"fingerprint": FP_A, "valid": True, "domain": "validated-ops.example"},
+                          {"fingerprint": FP_B, "valid": True, "domain": "validated-ops.example"}]):
+            report = _exit_report(FP_A, "198.51.100.10")
+            run(report, rows=rows, origins=origins, weights={}, relays=relays, aroi=aroi, fcrdns=names)
+            self.assertEqual(report["results"][0]["resolver"]["queries"], {"other": 30})
 
     def test_reverse_dns_only_for_ips_that_can_match_and_capped(self):
         """No operator domain, no reverse DNS; the heaviest candidates first, at most FCRDNS_MAX."""
@@ -551,10 +695,10 @@ class TestLocalTiers(unittest.TestCase):
         run(report, rows=rows, origins=origins, weights={}, relays=[_relay(FP_A, ["198.51.100.10:9001"])],
             fcrdns=fcrdns)
         self.assertEqual(calls, [])                                  # exit has no operator domain
-        relays = [_relay(FP_A, ["198.51.100.10:9001"], contact="url:https://ops.example")]
+        aroi = [{"fingerprint": FP_A, "valid": True, "domain": "ops-net.example"}]
         with mock.patch.object(resolver_stats, "FCRDNS_MAX", 1):
             run(_exit_report(FP_A, "198.51.100.10"), rows=rows, origins=origins, weights={},
-                relays=relays, fcrdns=fcrdns)
+                relays=[_relay(FP_A, ["198.51.100.10:9001"])], aroi=aroi, fcrdns=fcrdns)
         self.assertEqual(calls, ["192.0.2.50"])                      # heaviest only, capped at 1
 
     def test_archive_rows_writes_only_sampled_fields(self):
@@ -788,6 +932,68 @@ class TestLookups(unittest.TestCase):
         fake.resolver = types.SimpleNamespace(resolve=fail)
         with mock.patch.dict(sys.modules, {"dns": fake, "dns.resolver": fake.resolver}):
             self.assertEqual(resolver_stats.fcrdns_names("192.0.2.50"), set())
+
+    def test_fcrdns_candidates_include_names_registered_as_the_operator(self):
+        """A PTR registered in an operator's name is forward-checked like one under a domain."""
+        forward = []
+
+        def resolve(name, rdtype, lifetime=None):
+            """PTRs at a hoster; record every forward lookup."""
+            if rdtype == "PTR":
+                names = ["artikel10.in-berlin.de.", "artikel10x.in-berlin.de.", "web1.in-berlin.de.",
+                         "artikel10.attacker.test."]
+                return [types.SimpleNamespace(to_text=lambda n=n: n) for n in names]
+            forward.append(name)
+            return [types.SimpleNamespace(to_text=lambda: "217.197.91.153")]
+
+        fake = types.ModuleType("dns")
+        fake.resolver = types.SimpleNamespace(resolve=resolve)
+        with mock.patch.dict(sys.modules, {"dns": fake, "dns.resolver": fake.resolver}):
+            self.assertEqual(resolver_stats.fcrdns_names("217.197.91.153", set(), {"artikel10"}, SUFFIXES),
+                             {"artikel10.in-berlin.de"})
+        self.assertEqual(forward, ["artikel10.in-berlin.de"])
+
+    def test_at_most_one_forward_lookup_per_ip_matches_only_by_name(self):
+        """PTRs registered in an operator's name elsewhere cost one forward lookup, not FCRDNS_NAMES."""
+        forward = []
+
+        def resolve(name, rdtype, lifetime=None):
+            """Five names registered as artikel10 under other suffixes plus one under the operator domain."""
+            if rdtype == "PTR":
+                names = ["artikel10.%s." % suffix for suffix in ("se", "net", "de", "com", "hopto.org")]
+                names.append("ns.artikel10.org.")
+                return [types.SimpleNamespace(to_text=lambda n=n: n) for n in names]
+            forward.append(name)
+            raise OSError("timeout")
+
+        fake = types.ModuleType("dns")
+        fake.resolver = types.SimpleNamespace(resolve=resolve)
+        with mock.patch.dict(sys.modules, {"dns": fake, "dns.resolver": fake.resolver}):
+            resolver_stats.fcrdns_names("192.0.2.50", {"artikel10.org"}, {"artikel10"}, SUFFIXES)
+        self.assertEqual(forward, ["ns.artikel10.org", "artikel10.com"])
+
+    def test_operator_name_reaches_reverse_dns_in_production_path(self):
+        """With fcrdns=None, add_resolver_stats passes operator names to the real reverse-DNS check."""
+        forward = []
+
+        def resolve(name, rdtype, lifetime=None):
+            """PTR artikel10.in-berlin.de, forward-confirmed."""
+            if rdtype == "PTR":
+                return [types.SimpleNamespace(to_text=lambda: "artikel10.in-berlin.de.")]
+            forward.append(name)
+            return [types.SimpleNamespace(to_text=lambda: "217.197.91.153")]
+
+        fake = types.ModuleType("dns")
+        fake.resolver = types.SimpleNamespace(resolve=resolve)
+        report = _exit_report(FP_A, "198.51.100.10")
+        with mock.patch.dict(sys.modules, {"dns": fake, "dns.resolver": fake.resolver}):
+            add_resolver_stats(report, [row("u.aaaaaaaa.tor.exit.validator.1aeo.com", "217.197.91.153")],
+                               None, ranges=RANGES, origin={"198.51.100.10": {60729}, "217.197.91.153": {29670}}.get,
+                               weights={}, relays=[_relay(FP_A, ["198.51.100.10:9001"])],
+                               aroi=[{"fingerprint": FP_A, "valid": True, "domain": "artikel10.org"}],
+                               fcrdns=None, suffixes=SUFFIXES)
+        self.assertEqual(forward, ["artikel10.in-berlin.de"])
+        self.assertEqual(report["results"][0]["resolver"]["queries"], {"local_operator": 10})
 
     def test_fcrdns_forward_checks_only_candidate_names(self):
         """With domains, PTR names outside them are never forward-resolved; at most FCRDNS_NAMES are."""
