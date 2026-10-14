@@ -387,6 +387,22 @@ class TestLocalTiers(unittest.TestCase):
             fcrdns=lambda ip: {"artikel10.in-berlin.de"} if ip == "217.197.91.153" else set())
         self.assertEqual(report["results"][0]["resolver"]["queries"], {"other": 10})
 
+    def test_non_string_contact_and_aroi_domain_do_not_abort(self):
+        """A non-string ContactInfo or AROI domain is ignored and classification still finishes."""
+        relays = [_relay(FP_A, ["198.51.100.10:9001"]), _relay(FP_B, ["10.5.5.5:9001"])]
+        relays[0]["contact"] = {"email": "ops@example.net"}
+        relays[1]["contact"] = ["email:ops[]example.net"]
+        aroi = [{"fingerprint": FP_A, "valid": True, "domain": {"name": "example.net"}},
+                {"fingerprint": FP_B, "valid": True, "domain": 12}]
+        origins = {"198.51.100.10": {50}, "10.5.5.5": {77}}
+        report = _exit_report(FP_A, "198.51.100.10")
+        summary = run(report, rows=[row("u.aaaaaaaa.tor.exit.validator.1aeo.com", "10.5.5.5")],
+                      origins=origins, weights={}, relays=relays, aroi=aroi)
+        self.assertEqual(report["results"][0]["resolver"]["queries"], {"other": 10})
+        self.assertEqual(summary["version"], 2)
+        self.assertEqual(resolver_stats.norm_contact({"email": "x"}), "")
+        self.assertEqual(resolver_stats.contact_domains(["url:https://example.net"]), set())
+
     def test_legacy_local_counts_are_dropped_on_carry_forward(self):
         """A carried 'local' key from a version-1 report is not a version-2 category."""
         previous = _exit_report(FP_A, "203.0.113.5")

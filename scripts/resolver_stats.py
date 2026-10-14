@@ -269,8 +269,12 @@ def norm_contact(contact):
 
     The string is not authenticated. Operators who publish the same contact text are
     grouped only when a validated AROI domain is not available for the exit.
+    A missing or non-string value is ignored so a bad directory record cannot abort
+    the resolver step.
     """
-    return " ".join((contact or "").lower().split())
+    if not isinstance(contact, str):
+        return ""
+    return " ".join(contact.lower().split())
 
 
 def norm_domain(value):
@@ -291,9 +295,12 @@ def contact_domains(contact):
     """Domains named by CIISS url: and email: in contact. '[]' stands for '@'.
 
     Only those two keys count. Other contact text is not a domain signal.
+    A missing or non-string contact yields no domains.
     """
+    if not isinstance(contact, str):
+        return set()
     domains = set()
-    for key, raw in _CONTACT_FIELD.findall(contact or ""):
+    for key, raw in _CONTACT_FIELD.findall(contact):
         raw = raw.strip().strip("<>\"'")
         if key.lower() == "email":
             raw = raw.replace("[]", "@")
@@ -464,7 +471,10 @@ def _index_aroi(results, available):
         if not isinstance(row, dict) or row.get("valid") is not True:
             continue
         fp = fingerprint_of(row.get("fingerprint"))
-        domain = norm_domain(row.get("domain") or "")
+        raw_domain = row.get("domain")
+        if not isinstance(raw_domain, str):
+            continue
+        domain = norm_domain(raw_domain)
         if fp and domain:
             domain_of[fp] = domain
             by_domain[domain].add(fp)
