@@ -18,6 +18,24 @@ const CIRCUIT_FAILURE_TYPES = [
     'circuit_guard_limit', 'circuit_failed'
 ];
 
+// Shares (percent) of categories that together cover every lookup, as whole tenths of a percent
+// that add up to exactly 1000 (largest remainder, ties to the earlier key), so rounded rows still
+// sum to 100.0%. null when a share is missing or they do not total about 100%; callers then round
+// each share on its own.
+function roundSharesToTotal(keys, share) {
+    const values = keys.map((key) => share[key]);
+    if (!values.every((v) => typeof v === 'number' && Number.isFinite(v) && v >= 0)) return null;
+    const total = values.reduce((sum, v) => sum + v, 0);
+    if (Math.abs(total - 100) > 0.5) return null;
+    const exact = values.map((v) => Math.round(v * 1000 / total * 1e6) / 1e6);
+    const tenths = exact.map((v) => Math.floor(v));
+    let left = 1000 - tenths.reduce((sum, t) => sum + t, 0);
+    exact.map((v, i) => [v - tenths[i], i])
+        .sort((a, b) => b[0] - a[0] || a[1] - b[1])
+        .forEach(([, i]) => { if (left > 0) { tenths[i] += 1; left -= 1; } });
+    return Object.fromEntries(keys.map((key, i) => [key, tenths[i]]));
+}
+
 // Load latest.json and render the summary panel (counts, configuration, timing, resolvers, failures)
 async function loadStats() {
     const contentEl = document.getElementById('results-content');
@@ -241,30 +259,45 @@ async function loadStats() {
             '⏱️'
         );
 
-        // Public DNS resolver share (sampled Cloudflare DNS analytics, exit-probability weighted)
+        // DNS resolver shares (sampled Cloudflare DNS analytics, exit-probability weighted)
         const rs = meta.resolvers;
         if (rs && rs.public_share_pct) {
             const pct = (v) => `${(Number(v) || 0).toFixed(1)}%`;
-            const items = [['Google', 'google'], ['Cloudflare', 'cloudflare'], ['Quad9', 'quad9'], ['OpenDNS', 'opendns'], ['Freifunk München', 'ffmuc']]
-                .map(([label, key]) => [label, pct(rs.public_share_pct[key])]);
-            items.push(['Exits covered', pct(rs.exits_total ? 100 * rs.exits_covered / rs.exits_total : 0)]);
-            html += `
+            const providers = [['Google', 'google'], ['Cloudflare', 'cloudflare'], ['Quad9', 'quad9'], ['OpenDNS', 'opendns'], ['Freifunk München', 'ffmuc']];
+            const tiers = [['Local /24', 'local_24'], ['Local /22', 'local_22'], ['Local AS', 'local_as'], ['Local operator', 'local_operator']];
+            const share = rs.share_pct || {};
+            const tiered = share.local_24 !== undefined;  // version 2 splits "local" into tiers
+            const publicKeys = providers.map(([, key]) => key);
+            const localKeys = tiered ? tiers.map(([, key]) => key) : ['local'];
+            // Every lookup is in exactly one of these categories, so they are rounded together and
+            // add up to 100.0%; Public and Local are the sums of their rounded parts.
+            const tenths = roundSharesToTotal([...publicKeys, ...localKeys, 'other', 'unknown'], share);
+            const shareOf = (keys, fallback) => tenths
+                ? `${(keys.reduce((sum, key) => sum + tenths[key], 0) / 10).toFixed(1)}%`
+                : pct(fallback);
+            const row = (label, title, items) => `
                 <div class="details-row">
-                    <div class="detail-item"><span class="detail-label" style="color: var(--aeo-green); cursor: help;" title="Estimated share of exit DNS lookups (weighted by exit probability) sent via public resolver services, from sampled queries at our authoritative DNS over recent scans (3.5-day half-life).">🌐 Public DNS resolvers:</span></div>
+                    <div class="detail-item"><span class="detail-label" style="color: var(--aeo-green); cursor: help;" title="${title}">${label}:</span></div>
                     ${items.map(([lbl, v]) => `<div class="detail-item"><span class="detail-label">${lbl}:</span> <span class="detail-value">${v}</span></div>`).join('')}
                 </div>
             `;
+            if (rs.share_pct) {
+                const covered = Number(rs.exits_covered) || 0;
+                const total = Number(rs.exits_total) || 0;
+                html += row('📡 All DNS resolvers', "Estimated share of exit DNS lookups (weighted by exit probability), from sampled queries at our authoritative DNS over recent scans (3.5-day half-life). Every lookup is in exactly one of Public, Local, Other and Unknown. Other: any other resolver. Unknown: its network could not be looked up. Exits covered: exits with DNS success and enough sampled queries to count, out of all exits with DNS success.", [
+                    ['Exits covered', `${pct(total ? 100 * covered / total : 0)} (${covered.toLocaleString()} / ${total.toLocaleString()})`],
+                    ['Public', shareOf(publicKeys, rs.public_share_pct.all)],
+                    ['Local', shareOf(localKeys, localKeys.reduce((sum, key) => sum + (Number(share[key]) || 0), 0))],
+                    ['Other', shareOf(['other'], share.other)],
+                    ['Unknown', shareOf(['unknown'], share.unknown)],
+                ]);
+            }
+            html += row('🌐 Public DNS resolvers', "Estimated share of exit DNS lookups (weighted by exit probability) sent via public resolver services, from sampled queries at our authoritative DNS over recent scans (3.5-day half-life).",
+                providers.map(([label, key]) => [label, shareOf([key], rs.public_share_pct[key])]));
             // Version 2: the exit's own resolvers, split by distance from the exit
-            const share = rs.share_pct || {};
-            if (share.local_24 !== undefined) {
-                const local = [['Local /24', 'local_24'], ['Local /22', 'local_22'], ['Local AS', 'local_as'], ['Local operator', 'local_operator']]
-                    .map(([label, key]) => [label, pct(share[key])]);
-                html += `
-                <div class="details-row">
-                    <div class="detail-item"><span class="detail-label" style="color: var(--aeo-green); cursor: help;" title="Estimated share of exit DNS lookups (weighted by exit probability) sent via the exit's own resolvers. Each lookup counts in the first tier it matches. Local /24: same IPv4 /24 or IPv6 /64 as the exit, including its own address. Local /22: same IPv4 /22 or IPv6 /48, but not the same /24 or /64. Local AS: same origin AS, outside those prefixes. Local operator: run by the same AROI-validated operator, outside the exit's prefix and AS.">🏠 Local DNS resolvers:</span></div>
-                    ${local.map(([lbl, v]) => `<div class="detail-item"><span class="detail-label">${lbl}:</span> <span class="detail-value">${v}</span></div>`).join('')}
-                </div>
-            `;
+            if (tiered) {
+                html += row('🏠 Local DNS resolvers', "Estimated share of exit DNS lookups (weighted by exit probability) sent via the exit's own resolvers. Each lookup counts in the first tier it matches. Local /24: same IPv4 /24 or IPv6 /64 as the exit, including its own address. Local /22: same IPv4 /22 or IPv6 /48, but not the same /24 or /64. Local AS: same origin AS, outside those prefixes. Local operator: run by the same AROI-validated operator, outside the exit's prefix and AS.",
+                    tiers.map(([label, key]) => [label, shareOf([key], share[key])]));
             }
         }
 
