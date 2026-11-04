@@ -213,6 +213,45 @@ test_line_range_extraction() {
     rm -rf "$test_dir"
 }
 
+test_summary_wrong_ip_partial_only_when_present() {
+    # The cross-validate branch of read_report_summary prints the count only
+    # when metadata.cross_validation.wrong_ip_partial is present.
+    local tmp with without fn out
+    tmp=$(mktemp -d)
+    with="$tmp/with.json"
+    without="$tmp/without.json"
+    python3 - "$with" "$without" << 'PY'
+import json, sys
+def write(path, cv):
+    json.dump({"metadata": {
+        "consensus_relays": 1,
+        "tested_relays": 1,
+        "unreachable_relays": 0,
+        "reachability_rate_percent": 100,
+        "dns_success": 0,
+        "dns_success_rate_percent": 0,
+        "dns_fail": 0,
+        "dns_timeout": 0,
+        "dns_wrong_ip": 1,
+        "dns_socks_error": 0,
+        "dns_network_error": 0,
+        "scan": {"type": "cross_validate", "instances": 4},
+        "cross_validation": cv,
+    }}, open(path, "w"))
+write(sys.argv[1], {"relays_improved": 276, "wrong_ip_partial": 2})
+write(sys.argv[2], {"relays_improved": 278})
+PY
+    fn=$(sed -n '/^read_report_summary() {/,/^}/p' "$DEPLOY_DIR/scripts/run-dns-validation.sh")
+    present=$(bash -c "$fn"$'\n'"read_report_summary '$with'")
+    absent=$(bash -c "$fn"$'\n'"read_report_summary '$without'")
+    rm -rf "$tmp"
+    if grep -q "Wrong IP partial: 2" <<<"$present" && ! grep -q "Wrong IP partial" <<<"$absent"; then
+        pass "Cross-validate summary prints wrong_ip_partial only when the key is present"
+    else
+        fail "Cross-validate summary wrong_ip_partial" "present line, absent otherwise" "present=[$present] absent=[$absent]"
+    fi
+}
+
 # =============================================================================
 # Main
 # =============================================================================
@@ -227,6 +266,7 @@ run_test test_fingerprint_splitting
 run_test test_wave_stats_json
 run_test test_wave_retry_bounds
 run_test test_line_range_extraction
+run_test test_summary_wrong_ip_partial_only_when_present
 
 echo ""
 echo "=== Summary ==="
