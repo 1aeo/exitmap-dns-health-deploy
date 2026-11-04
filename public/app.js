@@ -116,6 +116,9 @@ async function loadStats() {
         if (scanType === 'cross_validate' && cv.relays_improved) {
             configItems.push(`<span class="detail-label">Relays Recovered:</span> <span class="detail-value">${cv.relays_improved.toLocaleString()}</span>`);
         }
+        if (cv.wrong_ip_partial) {
+            configItems.push(`<span class="detail-label">Wrong IP Partial:</span> <span class="detail-value">${Number(cv.wrong_ip_partial).toLocaleString()}</span>`);
+        }
         
         html += `
             <div class="details-row">
@@ -384,6 +387,36 @@ function bindPageButtons(container, callback) {
     });
 }
 
+// Text for a wrong_ip failure row: every observed wrong address and the
+// instance that saw it, plus how many probes succeeded when any did.
+function wrongIpFailureText(f) {
+    const cv = f.cv || {};
+    const per = cv.per_instance || {};
+    let expected = f.expected_ip;
+    const observed = [];
+    Object.keys(per).forEach((name) => {
+        const inst = per[name] || {};
+        if (!expected && inst.expected_ip) expected = inst.expected_ip;
+        if (inst.status !== 'wrong_ip') return;
+        const ip = inst.resolved_ip ? String(inst.resolved_ip) : '';
+        observed.push(ip ? `${ip} (${name})` : `(${name})`);
+    });
+    if (!expected) expected = '64.65.4.1';
+    if (observed.length === 0 && f.resolved_ip) observed.push(String(f.resolved_ip));
+    let text = `Expected ${expected}; got ${observed.join(', ')}`;
+    const succeeded = Number(cv.instances_success) || 0;
+    const total = Number(cv.instances_total) || 0;
+    if (succeeded > 0 && total > 0) {
+        text += `; ${succeeded}/${total} probes succeeded`;
+    }
+    return text;
+}
+
+function failureErrorText(f) {
+    if (f.status === 'wrong_ip') return wrongIpFailureText(f);
+    return f.error || '';
+}
+
 // Display a page of the failures table
 function displayFailuresPage(page) {
     const container = document.getElementById('failures-table-container');
@@ -397,12 +430,16 @@ function displayFailuresPage(page) {
         <table class="failures-table">
             <thead><tr><th>Nickname</th><th>Fingerprint</th><th>Status</th><th>Error</th></tr></thead>
             <tbody>${allFailures.slice(start, start + failuresPerPage).map(f => {
-                const err = f.error || '';
+                const err = failureErrorText(f);
+                const shown = f.status === 'wrong_ip' || err.length <= 120
+                    ? err
+                    : err.slice(0, 120) + '...';
+                const esc = escapeHtml(err).replace(/"/g, '&quot;');
                 return `<tr>
                     <td><strong>${escapeHtml(f.exit_nickname || 'Unknown')}</strong></td>
                     <td class="fingerprint"><a href="${getTorMetricsUrl(f.exit_fingerprint)}" target="_blank" rel="noopener">${f.exit_fingerprint || ''}</a></td>
                     <td><span class="status-badge ${f.status || 'error'}">${f.status || 'error'}</span></td>
-                    <td style="color: var(--aeo-text-muted); font-size: 0.8rem;" title="${escapeHtml(err)}">${escapeHtml(err.slice(0, 120))}${err.length > 120 ? '...' : ''}</td>
+                    <td style="color: var(--aeo-text-muted); font-size: 0.8rem;" title="${esc}">${escapeHtml(shown)}</td>
                 </tr>`;
             }).join('')}</tbody>
         </table>

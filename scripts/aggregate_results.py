@@ -243,10 +243,12 @@ def load_all_source_results(source_dirs):
 def cross_validate_results(source_dirs):
     """
     Cross-validate results from multiple sources with full per-instance details.
-    
-    For each relay, keep the BEST result (success beats timeout, etc.)
-    This allows transient failures in one instance to be recovered by success in another.
-    Each relay gets a 'cv' field with per-instance breakdown.
+
+    A transient failure (timeout, dns_fail, socks_error, and the other
+    non-wrong_ip statuses) is discarded when another instance succeeds.
+    A wrong_ip is kept even when another instance returns the expected
+    address: any wrong_ip is published, chosen before the priority sort.
+    Each relay gets a 'cv' field with the per-instance breakdown.
     """
     all_results, instance_names = load_all_source_results(source_dirs)
     
@@ -258,6 +260,7 @@ def cross_validate_results(source_dirs):
         "recovered_from_timeout": 0,
         "recovered_from_dns_fail": 0,
         "recovered_from_error": 0,
+        "wrong_ip_partial": 0,
         "consistency": {"all_success": 0, "all_failed": 0, "mixed": 0},
         "per_instance_stats": {name: Counter() for name in instance_names},
     }
@@ -273,15 +276,24 @@ def cross_validate_results(source_dirs):
             cv_stats["per_instance_stats"][inst_name][status] += 1
             per_instance[inst_name] = _extract_instance_detail(result)
         
-        # Find best result (sort by cross-validation result priority)
+        # wrong_ip is a real answer, not a transient miss. Publish one of
+        # those records before the priority sort so a success cannot hide it.
+        # Priority numbers stay as they are (success 0, wrong_ip 1, dns_fail 2).
+        # Several wrong_ip results tie, and the stable sort keeps the first
+        # one in source-directory order.
+        statuses = [r.get("status") for r in instance_results.values()]
+        wrong_ip_results = [
+            item for item in instance_results.items()
+            if item[1].get("status") == "wrong_ip"
+        ]
+        candidates = wrong_ip_results if wrong_ip_results else instance_results.items()
         sorted_results = sorted(
-            instance_results.items(),
+            candidates,
             key=lambda x: CROSS_VALIDATION_RESULT_PRIORITY.get(x[1].get("status", "unknown"), 99)
         )
         best_inst, best_result = sorted_results[0]
         
-        # Calculate consistency stats
-        statuses = [r.get("status") for r in instance_results.values()]
+        # Consistency describes the instances, not the published status.
         success_count = statuses.count("success")
         
         if success_count == len(statuses):
@@ -291,40 +303,51 @@ def cross_validate_results(source_dirs):
         else:
             cv_stats["consistency"]["mixed"] += 1
         
-        # Calculate average timing across successful instances
-        successful_timings = [
-            r.get("timing") for r in instance_results.values()
-            if r.get("status") == "success" and r.get("timing")
-        ]
-        if successful_timings:
-            # Average total timing
-            total_values = [t.get("total_ms") for t in successful_timings if t.get("total_ms") is not None]
-            avg_timing = {"total_ms": round(sum(total_values) / len(total_values)) if total_values else None}
-            best_result["timing"] = avg_timing
+        # Average timing only when the published result is success.
+        # A wrong_ip record keeps that instance's timing, resolved IP, and error.
+        if best_result.get("status") == "success":
+            successful_timings = [
+                r.get("timing") for r in instance_results.values()
+                if r.get("status") == "success" and r.get("timing")
+            ]
+            if successful_timings:
+                # Average total timing
+                total_values = [t.get("total_ms") for t in successful_timings if t.get("total_ms") is not None]
+                avg_timing = {"total_ms": round(sum(total_values) / len(total_values)) if total_values else None}
+                best_result["timing"] = avg_timing
+        
+        published_status = best_result.get("status")
+        # A wrong_ip is not recovered by another probe. improved is a real
+        # recovery: published success, and some other instance failed transiently.
+        recoverable = [s for s in statuses if s != "success" and s != "wrong_ip"]
+        improved = published_status == "success" and bool(recoverable)
         
         # Build CV details for this relay
         cv_detail = {
             "result_source": best_inst,
             "instances_success": success_count,
             "instances_total": len(instance_results),
-            "improved": success_count > 0 and success_count < len(statuses),
+            "improved": improved,
             "per_instance": per_instance,
         }
         
-        # Track improvements and what we recovered from
-        if cv_detail["improved"]:
+        # Track improvements and what we recovered from. wrong_ip never counts.
+        if improved:
             cv_stats["improved"] += 1
             recovered_from = []
-            for s in statuses:
-                if s != "success":
-                    recovered_from.append(s)
-                    if s in ("timeout", "hard_timeout"):
-                        cv_stats["recovered_from_timeout"] += 1
-                    elif s == "dns_fail":
-                        cv_stats["recovered_from_dns_fail"] += 1
-                    else:
-                        cv_stats["recovered_from_error"] += 1
+            for s in recoverable:
+                recovered_from.append(s)
+                if s in ("timeout", "hard_timeout"):
+                    cv_stats["recovered_from_timeout"] += 1
+                elif s == "dns_fail":
+                    cv_stats["recovered_from_dns_fail"] += 1
+                else:
+                    cv_stats["recovered_from_error"] += 1
             cv_detail["recovered_from"] = recovered_from
+        
+        wrong_ip_count = statuses.count("wrong_ip")
+        if 0 < wrong_ip_count < len(statuses):
+            cv_stats["wrong_ip_partial"] += 1
         
         # Add CV details to best result
         best_result["cv"] = cv_detail
@@ -335,6 +358,7 @@ def cross_validate_results(source_dirs):
     print(f"  - Recovered from timeout: {cv_stats['recovered_from_timeout']}")
     print(f"  - Recovered from DNS fail: {cv_stats['recovered_from_dns_fail']}")
     print(f"  - Recovered from other errors: {cv_stats['recovered_from_error']}")
+    print(f"  - Wrong IP partial: {cv_stats['wrong_ip_partial']}")
     print(f"Consistency: {cv_stats['consistency']['all_success']} all-success, "
           f"{cv_stats['consistency']['all_failed']} all-failed, "
           f"{cv_stats['consistency']['mixed']} mixed")
@@ -643,6 +667,8 @@ def print_summary(report):
         print("    - Recovered from timeout: %d" % cv.get("recovered_from_timeout", 0))
         print("    - Recovered from DNS fail: %d" % cv.get("recovered_from_dns_fail", 0))
         print("    - Recovered from other: %d" % cv.get("recovered_from_error", 0))
+        if "wrong_ip_partial" in cv:
+            print("  Wrong IP partial: %d" % cv["wrong_ip_partial"])
         
         # Per-instance stats
         per_inst = cv.get("per_instance_stats", {})
@@ -766,6 +792,7 @@ def main():
             "recovered_from_timeout": cv_stats.get("recovered_from_timeout", 0),
             "recovered_from_dns_fail": cv_stats.get("recovered_from_dns_fail", 0),
             "recovered_from_error": cv_stats.get("recovered_from_error", 0),
+            "wrong_ip_partial": cv_stats.get("wrong_ip_partial", 0),
             "consistency": cv_stats.get("consistency", {}),
             "per_instance_stats": {
                 name: dict(counts) 

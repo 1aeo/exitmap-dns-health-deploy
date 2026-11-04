@@ -746,6 +746,7 @@
                     <li><strong>Wildcard DNS:</strong> Query unique subdomain (e.g., <code style="color: var(--status-info);">{uuid}.{fingerprint}.tor.exit.validator.1aeo.com</code>)</li>
                     <li><strong>IP Verification:</strong> Confirm resolution returns expected IP address</li>
                     <li><strong>Error Detection:</strong> Identify NXDOMAIN, timeouts, wrong IPs, and SOCKS errors</li>
+                    <li><strong>Cross-Validation:</strong> A timeout or DNS failure is discarded when another probe succeeds. A wrong IP is kept even when another probe returns the expected address.</li>
                 </ul>
                 <p style="color: var(--aeo-text-dim); font-size: 0.9rem;">
                     Powered by <a href="https://github.com/1aeo/exitmap" target="_blank" rel="noopener noreferrer">exitmap</a> • 

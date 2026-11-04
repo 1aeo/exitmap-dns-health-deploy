@@ -216,6 +216,8 @@ try:
             cv = m.get('cross_validation', {})
             print(f\"Scan Mode: Cross-validation ({scan.get('instances', 0)} instances)\")
             print(f\"Relays recovered by CV: {cv.get('relays_improved', 'N/A')}\")
+            if 'wrong_ip_partial' in cv:
+                print(f\"Wrong IP partial: {cv['wrong_ip_partial']}\")
         elif scan_type == 'split':
             print(f\"Scan Mode: Split ({scan.get('instances', 0)} instances)\")
 except Exception as e:
