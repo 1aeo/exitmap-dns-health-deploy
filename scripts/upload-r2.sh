@@ -12,7 +12,28 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/upload-common.sh"
-trap cleanup_local_backup_staging EXIT
+
+_r2_local_backup_reported=false
+report_r2_local_backup_result() {
+    local outcome="$1" tmp_file
+    [[ -n "${EXITMAP_LOCAL_BACKUP_RESULT_FILE:-}" ]] || return 0
+    tmp_file="${EXITMAP_LOCAL_BACKUP_RESULT_FILE}.tmp.$$"
+    ensure_dir "$(dirname "$EXITMAP_LOCAL_BACKUP_RESULT_FILE")" 2>/dev/null || return 0
+    if printf '%s\n' "$outcome" > "$tmp_file" 2>/dev/null && mv -f -- "$tmp_file" "$EXITMAP_LOCAL_BACKUP_RESULT_FILE" 2>/dev/null; then
+        _r2_local_backup_reported=true
+    else
+        rm -f -- "$tmp_file" 2>/dev/null || true
+    fi
+    return 0
+}
+
+cleanup_r2_exit() {
+    cleanup_local_backup_staging
+    if [[ "${_r2_local_backup_reported:-false}" != "true" ]]; then
+        report_r2_local_backup_result failed || true
+    fi
+}
+trap cleanup_r2_exit EXIT
 
 # shellcheck disable=SC2034 # Read in sourced upload-common.sh
 STORAGE_NAME="R2"
@@ -57,6 +78,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --help|-h)
+            _r2_local_backup_reported=true
             show_help
             ;;
         --)
@@ -76,6 +98,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ "$ACTION" == "list" ]]; then
+    _r2_local_backup_reported=true
     init_upload
     check_rclone
     ensure_r2_remote
@@ -85,6 +108,7 @@ fi
 
 # Check if first positional arg is a file -> file upload mode
 if [[ ${#POSITIONAL[@]} -gt 0 && -f "${POSITIONAL[0]}" ]]; then
+    _r2_local_backup_reported=true
     init_upload
     check_rclone || exit 1
     ensure_r2_remote || exit 1
@@ -104,6 +128,11 @@ BUCKET="${EXITMAP_R2_REMOTE}:${R2_BUCKET:?R2_BUCKET not set}"
 log "☁️  R2: ${R2_BUCKET} | $TRANSFERS transfers"
 
 maybe_backup "$BUCKET" "$LOCAL_BACKUP_MARKER" local "$FORCE" || true
+case "${_LOCAL_BACKUP_OUTCOME:-failed}" in
+    created|already_done) report_r2_local_backup_result "$_LOCAL_BACKUP_OUTCOME" ;;
+    skipped_*) report_r2_local_backup_result skipped ;;
+    *) report_r2_local_backup_result failed ;;
+esac
 maybe_backup "$BUCKET" "$LOG_DIR/last-r2-backup-date" remote "$FORCE" || true
 do_upload "$BUCKET"
 

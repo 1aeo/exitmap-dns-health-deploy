@@ -123,11 +123,14 @@ maybe_backup() {
     local bucket="$1" marker="$2" type="$3" force="${4:-false}"
 
     if [[ "$type" == "local" ]]; then
+        _LOCAL_BACKUP_OUTCOME="failed"
         if [[ "${SKIP_LOCAL_BACKUP:-false}" == "true" && "$force" != "true" ]]; then
+            _LOCAL_BACKUP_OUTCOME="skipped_disabled"
             log "Local backup skipped (--no-local-backup)"
             return 1
         fi
         if [[ "$force" != "true" && -f "$marker" && "$(cat "$marker" 2>/dev/null || true)" == "$TODAY" ]]; then
+            _LOCAL_BACKUP_OUTCOME="already_done"
             return 1
         fi
 
@@ -135,6 +138,7 @@ maybe_backup() {
         exec 7>"$LOCAL_BACKUP_LOCK_FILE"
         if ! flock -n 7; then
             exec 7>&-
+            _LOCAL_BACKUP_OUTCOME="locked"
             log "Local backup skipped (another upload holds local backup lock)"
             return 1
         fi
@@ -142,6 +146,7 @@ maybe_backup() {
         # Re-check shared marker after acquiring lock in case sibling upload just finished
         if [[ "$force" != "true" && -f "$marker" && "$(cat "$marker" 2>/dev/null || true)" == "$TODAY" ]]; then
             exec 7>&-
+            _LOCAL_BACKUP_OUTCOME="already_done"
             return 1
         fi
 
@@ -160,13 +165,22 @@ maybe_backup() {
             rm -rf -- "$tmp_target" || true
             LOCAL_BACKUP_STAGING_DIR=""
             exec 7>&-
+            _LOCAL_BACKUP_OUTCOME="failed"
             return 1
         fi
 
-        mv -- "$tmp_target" "$final_target"
+        if ! mv -- "$tmp_target" "$final_target"; then
+            log_warn "Local backup rename failed; marker not updated"
+            rm -rf -- "$tmp_target" || true
+            LOCAL_BACKUP_STAGING_DIR=""
+            exec 7>&-
+            _LOCAL_BACKUP_OUTCOME="failed"
+            return 1
+        fi
         LOCAL_BACKUP_STAGING_DIR=""
         write_marker_atomically "$marker" "$TODAY"
         exec 7>&-
+        _LOCAL_BACKUP_OUTCOME="created"
         log_success "Local backup done"
         return 0
     fi

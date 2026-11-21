@@ -64,11 +64,19 @@ validate_config_values() {
                TOR_BOOTSTRAP_TIMEOUT TOR_MAX_BOOTSTRAP_RETRIES TOR_PROGRESS_CHECK_INTERVAL \
                WAVE_BATCH_SIZE WAVE_MAX_RETRIES MAX_PENDING_CIRCUITS \
                RCLONE_TRANSFERS RCLONE_CHECKERS DO_RCLONE_TRANSFERS DO_RCLONE_CHECKERS \
-               ANALYSIS_KEEP_COUNT EXITMAP_GRACE_TIMEOUT \
-               KEEP_BACKUPS LOCAL_KEEP_BACKUPS LOG_COMPRESS_DAYS CRON_LOG_MAX_BYTES CRON_LOG_ARCHIVES; do
+               ANALYSIS_KEEP_COUNT EXITMAP_GRACE_TIMEOUT LOG_COMPRESS_DAYS; do
         local value="${!var:-}"
         if [[ -n "$value" ]] && ! [[ "$value" =~ ^[0-9]+$ ]]; then
             echo "Error: $var must be numeric, got: $value" >&2
+            ((errors++))
+        fi
+    done
+
+    # Validate positive integer settings (reject 0 and leading-zero forms)
+    for var in KEEP_BACKUPS LOCAL_KEEP_BACKUPS CRON_LOG_MAX_BYTES CRON_LOG_ARCHIVES; do
+        local value="${!var:-}"
+        if [[ -n "$value" ]] && ! [[ "$value" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Error: $var must be a positive integer, got: $value" >&2
             ((errors++))
         fi
     done
@@ -99,6 +107,7 @@ load_config() {
     
     if [[ -n "$config_file" && -f "$config_file" ]]; then
         validate_config "$config_file"
+        # shellcheck source=/dev/null
         source "$config_file"
         loaded=true
     elif [[ -f "$DEPLOY_DIR/config.env" ]]; then

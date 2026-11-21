@@ -38,7 +38,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/common.sh"
 
 # Capture caller environment overrides before load_config sources config.env
-PRUNE_OVERRIDE_VARS=(BACKUP_DIR R2_BUCKET R2_ENABLED RCLONE_PATH KEEP_BACKUPS LOCAL_KEEP_BACKUPS)
+PRUNE_OVERRIDE_VARS=(BACKUP_DIR LOG_DIR LOCAL_BACKUP_LOCK_FILE R2_BUCKET R2_ENABLED RCLONE_PATH KEEP_BACKUPS LOCAL_KEEP_BACKUPS)
 PRUNE_OVERRIDE_STATES=()
 PRUNE_OVERRIDE_VALUES=()
 for _var in "${PRUNE_OVERRIDE_VARS[@]}"; do
@@ -61,6 +61,8 @@ for _i in "${!PRUNE_OVERRIDE_VARS[@]}"; do
 done
 
 BACKUP_DIR="${BACKUP_DIR:-$DEPLOY_DIR/backups}"
+LOG_DIR="${LOG_DIR:-$DEPLOY_DIR/logs}"
+LOCAL_BACKUP_LOCK_FILE="${LOCAL_BACKUP_LOCK_FILE:-$LOG_DIR/.local-backup.lock}"
 RCLONE="${RCLONE_PATH:-$(command -v rclone 2>/dev/null || echo "$HOME/bin/rclone")}"
 KEEP_BACKUPS="${KEEP_BACKUPS:-7}"
 LOCAL_KEEP_BACKUPS="${LOCAL_KEEP_BACKUPS:-$KEEP_BACKUPS}"
@@ -88,18 +90,40 @@ prune_local() {
         return 1
     fi
 
-    # Remove stale incomplete staging directories older than 24 hours
-    while IFS= read -r -d '' stale_tmp; do
-        if $DRY_RUN; then
-            prune_log "[DRY-RUN] Would remove stale temp: $(basename "$stale_tmp")"
-        else
-            prune_log "Removing stale temp: $(basename "$stale_tmp")"
-            if ! rm -rf -- "$stale_tmp"; then
-                prune_log "❌ Failed to remove stale temp: $stale_tmp"
-                return 1
-            fi
+    # Remove stale incomplete staging directories older than 24 hours only when
+    # no local backup holds LOCAL_BACKUP_LOCK_FILE (rclone writes into subdirs).
+    local run_stale_cleanup=true prune_lock_open=false
+    if [[ -f "$LOCAL_BACKUP_LOCK_FILE" ]] && command -v flock >/dev/null 2>&1; then
+        exec 7>"$LOCAL_BACKUP_LOCK_FILE"
+        prune_lock_open=true
+        if ! flock -n 7; then
+            exec 7>&-
+            prune_lock_open=false
+            run_stale_cleanup=false
+            prune_log "Skipping stale temp cleanup (local backup lock is held)"
         fi
-    done < <(find "$BACKUP_DIR" -maxdepth 1 -type d -name 'backup-*.tmp.*' -mmin +1440 -print0 2>/dev/null)
+    fi
+
+    if [[ "$run_stale_cleanup" == "true" ]]; then
+        while IFS= read -r -d '' stale_tmp; do
+            if $DRY_RUN; then
+                prune_log "[DRY-RUN] Would remove stale temp: $(basename "$stale_tmp")"
+            else
+                prune_log "Removing stale temp: $(basename "$stale_tmp")"
+                if ! rm -rf -- "$stale_tmp"; then
+                    if [[ "$prune_lock_open" == "true" ]]; then
+                        exec 7>&-
+                    fi
+                    prune_log "❌ Failed to remove stale temp: $stale_tmp"
+                    return 1
+                fi
+            fi
+        done < <(find "$BACKUP_DIR" -maxdepth 1 -type d -name 'backup-*.tmp.*' -mmin +1440 -print0 2>/dev/null)
+    fi
+
+    if [[ "$prune_lock_open" == "true" ]]; then
+        exec 7>&-
+    fi
 
     # Enumerate completed backup directories only (ignore active *.tmp.*)
     local was_nullglob=false

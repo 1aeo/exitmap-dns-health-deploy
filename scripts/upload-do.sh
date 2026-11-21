@@ -7,6 +7,7 @@
 #   ./scripts/upload-do.sh --list-backups    # Show backup status
 #   ./scripts/upload-do.sh --force-backup    # Force backup today
 #   ./scripts/upload-do.sh --no-local-backup # Skip local backup (remote backup still runs)
+#   ./scripts/upload-do.sh --local-backup-only [source_dir]  # Local backup only
 
 set -euo pipefail
 
@@ -28,6 +29,7 @@ show_help() {
     echo "  --list-backups      Show backup status"
     echo "  --force-backup      Force backup even if done today"
     echo "  --no-local-backup   Skip local backup step (still updates remote backup)"
+    echo "  --local-backup-only Take local backup from DO Spaces only"
     echo "  -h, --help          Show this help"
     echo ""
     echo "Examples:"
@@ -39,6 +41,7 @@ show_help() {
 
 ACTION="sync"
 FORCE=false
+LOCAL_BACKUP_ONLY=false
 POSITIONAL=()
 
 while [[ $# -gt 0 ]]; do
@@ -54,6 +57,10 @@ while [[ $# -gt 0 ]]; do
         --no-local-backup)
             # shellcheck disable=SC2034 # Read in sourced upload-common.sh
             SKIP_LOCAL_BACKUP=true
+            shift
+            ;;
+        --local-backup-only)
+            LOCAL_BACKUP_ONLY=true
             shift
             ;;
         --help|-h)
@@ -95,6 +102,18 @@ if [[ ${#POSITIONAL[@]} -gt 0 && -f "${POSITIONAL[0]}" ]]; then
 fi
 
 init_upload "${POSITIONAL[0]:-}"
+
+if [[ "$LOCAL_BACKUP_ONLY" == "true" ]]; then
+    check_rclone || exit 1
+    ensure_do_remote || exit 1
+    BUCKET="${EXITMAP_DO_REMOTE}:${DO_SPACES_BUCKET:?DO_SPACES_BUCKET not set}"
+    log "☁️  DO Spaces fallback local backup: ${DO_SPACES_BUCKET}"
+    maybe_backup "$BUCKET" "$LOCAL_BACKUP_MARKER" local "$FORCE" || true
+    if [[ "${_LOCAL_BACKUP_OUTCOME:-failed}" == "created" || "${_LOCAL_BACKUP_OUTCOME:-failed}" == "already_done" ]]; then
+        log_success "DO Spaces local backup complete"
+    fi
+    exit 0
+fi
 
 check_rclone || exit 1
 [[ -d "$SOURCE_DIR" ]] || { log_error "Source not found: $SOURCE_DIR"; exit 1; }

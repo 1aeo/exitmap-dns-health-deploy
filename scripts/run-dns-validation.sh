@@ -343,7 +343,7 @@ cleanup_all() {
         $was_nullglob || shopt -u nullglob
     fi
     if [[ -d "${TMP_DIR:-}" ]]; then
-        find "$TMP_DIR" -maxdepth 1 -type d -name 'exitmap_tor_*' -mmin +1440 -exec rm -rf -- {} + 2>/dev/null || true
+        find "$TMP_DIR" -mindepth 1 -maxdepth 1 -type d -name 'exitmap_tor_*' -mmin +1440 -exec rm -rf -- {} + 2>/dev/null || true
     fi
 
     # 6. Cleanup temp files
@@ -712,31 +712,58 @@ do_uploads() {
     local report_file="${OUTPUT_DIR}/dns_health_${TIMESTAMP}.json"
     local latest_report="${OUTPUT_DIR}/latest.json"
     
-    local pids=()
+    local do_pid="" r2_pid="" do_exit=0 r2_exit=0
     local do_args=()
+    local r2_result_file="" r2_backup_result=""
 
     # When both R2 and DO run in parallel, let R2 take the single daily local backup
+    # and propagate its local-backup outcome so DO falls back if R2 fails/skips.
     if [[ "${DO_ENABLED:-false}" == "true" && "${R2_ENABLED:-false}" == "true" ]]; then
         do_args+=(--no-local-backup)
+        if [[ -x "$DEPLOY_DIR/scripts/upload-r2.sh" && -x "$DEPLOY_DIR/scripts/upload-do.sh" ]]; then
+            r2_result_file=$(mktemp "${TMP_DIR:-/tmp}/exitmap-r2-local-backup.XXXXXX" 2>/dev/null || echo "")
+        fi
     fi
 
     if [[ "${DO_ENABLED:-false}" == "true" ]] && [[ -x "$DEPLOY_DIR/scripts/upload-do.sh" ]]; then
         log "Uploading to DigitalOcean Spaces..."
-        "$DEPLOY_DIR/scripts/upload-do.sh" "${do_args[@]}" &
-        pids+=($!)
+        "$DEPLOY_DIR/scripts/upload-do.sh" ${do_args[@]+"${do_args[@]}"} &
+        do_pid=$!
     fi
     
     if [[ "${R2_ENABLED:-false}" == "true" ]] && [[ -x "$DEPLOY_DIR/scripts/upload-r2.sh" ]]; then
         log "Uploading to Cloudflare R2..."
-        "$DEPLOY_DIR/scripts/upload-r2.sh" &
-        pids+=($!)
+        EXITMAP_LOCAL_BACKUP_RESULT_FILE="$r2_result_file" "$DEPLOY_DIR/scripts/upload-r2.sh" &
+        r2_pid=$!
     fi
-    
-    for pid in "${pids[@]:-}"; do
-        if ! wait "$pid"; then
-            log "Upload failed (PID $pid)"
+
+    if [[ -n "$do_pid" ]]; then
+        if ! wait "$do_pid"; then
+            do_exit=$?
+            log "DO upload failed (PID $do_pid, exit $do_exit)"
         fi
-    done
+    fi
+
+    if [[ -n "$r2_pid" ]]; then
+        if ! wait "$r2_pid"; then
+            r2_exit=$?
+            log "R2 upload failed (PID $r2_pid, exit $r2_exit)"
+        fi
+    fi
+
+    if [[ -n "$do_pid" && -n "$r2_pid" && "$do_exit" -eq 0 ]]; then
+        if [[ -n "$r2_result_file" && -f "$r2_result_file" ]]; then
+            r2_backup_result=$(cat "$r2_result_file" 2>/dev/null || true)
+        fi
+        if [[ "$r2_exit" -ne 0 || "$r2_backup_result" == "failed" || "$r2_backup_result" == "skipped" ]]; then
+            log "R2 did not complete today's local backup (${r2_backup_result:-exit $r2_exit}); falling back to DO local backup..."
+            "$DEPLOY_DIR/scripts/upload-do.sh" --local-backup-only || \
+                log "DO fallback local backup failed"
+        fi
+    fi
+    if [[ -n "$r2_result_file" ]]; then
+        rm -f -- "$r2_result_file"
+    fi
 }
 
 # Helper: Start N parallel instances
@@ -1185,6 +1212,7 @@ get_file_size_bytes() {
 }
 
 # Copy-truncate rotation preserves the open file descriptor used by cron redirects (>>)
+# and leaves the original log intact if staging, compression, or archive installation fails.
 rotate_log_copytruncate() {
     local log_file=$1
     local max_bytes=$2
@@ -1196,6 +1224,13 @@ rotate_log_copytruncate() {
     [[ "$size" =~ ^[0-9]+$ ]] || return 0
     [[ "$size" -ge "$max_bytes" ]] || return 0
 
+    local staging="${log_file}.1.tmp.$$"
+    if ! cp -- "$log_file" "$staging" || ! gzip -f -- "$staging"; then
+        rm -f -- "$staging" "${staging}.gz" 2>/dev/null || true
+        log "Warning: Failed to stage/compress log rotation for $(basename "$log_file"); original log left intact"
+        return 0
+    fi
+
     local i prev
     for ((i = keep_archives; i >= 2; i--)); do
         prev=$((i - 1))
@@ -1204,13 +1239,11 @@ rotate_log_copytruncate() {
         fi
     done
 
-    local staging="${log_file}.1.tmp.$$"
-    if cp -- "$log_file" "$staging" && : > "$log_file" && gzip -f -- "$staging"; then
-        mv -f -- "${staging}.gz" "${log_file}.1.gz"
+    if mv -f -- "${staging}.gz" "${log_file}.1.gz"; then
+        : > "$log_file"
         log "Rotated log: $(basename "$log_file") (${size} bytes)"
     else
-        rm -f -- "$staging" "${staging}.gz" 2>/dev/null || true
-        log "Warning: Failed to rotate log: $(basename "$log_file")"
+        log "Warning: Failed to install ${log_file}.1.gz (staged archive preserved at ${staging}.gz); original log left intact"
     fi
 }
 

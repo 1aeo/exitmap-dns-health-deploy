@@ -146,6 +146,7 @@ EOF
     chmod 600 "$box/config.env"
 
     local rclone_log="$box/logs/rclone.log"
+    # shellcheck disable=SC2016
     env EXITMAP_TEST_MODE=1 MOCK_RCLONE_LOG="$rclone_log" bash -c '
         source "$1"
         do_uploads
@@ -175,6 +176,7 @@ EOF
     mv "$box/config.env.tmp" "$box/config.env"
     chmod 600 "$box/config.env"
 
+    # shellcheck disable=SC2016
     env EXITMAP_TEST_MODE=1 MOCK_RCLONE_LOG="$rclone_log" bash -c '
         source "$1"
         do_uploads
@@ -196,6 +198,30 @@ EOF
         pass "do_uploads takes local backup from DO when R2_ENABLED=false"
     else
         fail "do_uploads DO-only" "dirs=${#local_dirs[@]}"
+        return
+    fi
+
+    # Verify DO falls back to local backup when R2 fails pre-checks (missing R2_BUCKET/creds)
+    rm -rf "$box/backups"/backup-* "$box/logs/last-local-backup-date" "$rclone_log"
+    sed -e 's/R2_ENABLED=false/R2_ENABLED=true/' -e '/R2_ACCESS_KEY_ID/d' "$box/config.env" > "$box/config.env.tmp"
+    mv "$box/config.env.tmp" "$box/config.env"
+    chmod 600 "$box/config.env"
+
+    # shellcheck disable=SC2016
+    env EXITMAP_TEST_MODE=1 MOCK_RCLONE_LOG="$rclone_log" bash -c '
+        source "$1"
+        do_uploads
+    ' _ "$box/scripts/run-dns-validation.sh" > "$box/logs/do_fallback.out" 2>&1
+
+    shopt -s nullglob
+    local_dirs=("$box/backups"/backup-*)
+    shopt -u nullglob
+    local do_local_syncs
+    do_local_syncs=$(grep -c "sync exitmap-spaces:test-do .*/backups/backup-" "$rclone_log" || true)
+    if [[ ${#local_dirs[@]} -eq 1 && "$do_local_syncs" -eq 1 && -f "$box/logs/last-local-backup-date" ]]; then
+        pass "do_uploads falls back to DO local backup when R2 fails pre-checks"
+    else
+        fail "do_uploads R2 pre-check failure fallback" "dirs=${#local_dirs[@]} do_local_syncs=$do_local_syncs"
     fi
 }
 
@@ -223,7 +249,13 @@ EOF
     local p1=$!
     MOCK_RCLONE_LOG="$rclone_log" MOCK_SLEEP_LOCAL=0.4 "$box/scripts/upload-do.sh" > "$box/logs/do.out" 2>&1 &
     local p2=$!
-    wait "$p1" "$p2"
+    local rc1=0 rc2=0
+    wait "$p1" || rc1=$?
+    wait "$p2" || rc2=$?
+    if [[ $rc1 -ne 0 || $rc2 -ne 0 ]]; then
+        fail "parallel flock dedup exit status" "rc1=$rc1 rc2=$rc2"
+        return
+    fi
 
     local local_dirs=()
     shopt -s nullglob
@@ -413,6 +445,7 @@ EOF
     echo "stale" > "$box/tmp/exitmap_tor_99/cached-consensus"
     set_age_hours "$box/tmp/exitmap_tor_99" 30
 
+    # shellcheck disable=SC2016
     env EXITMAP_TEST_MODE=1 bash -c '
         source "$1"
         touch "$UNIFIED_LOG"
@@ -452,6 +485,60 @@ EOF
         pass "cleanup_all removes per-wave and stale exitmap_tor_* dirs while preserving tor_cache"
     else
         fail "cleanup_all wave/stale tor cleanup"
+        return
+    fi
+
+    # Regression check: TMP_DIR named exitmap_tor_* must NEVER delete itself (requires -mindepth 1)
+    local self_box="$WORK/exitmap_tor_self_tmp"
+    mkdir -p "$self_box/sub"
+    set_age_hours "$self_box" 30
+    # shellcheck disable=SC2016
+    env EXITMAP_TEST_MODE=1 TMP_DIR="$self_box" LOG_DIR="$box/logs" OUTPUT_DIR="$box/public" bash -c '
+        source "$1"
+        cleanup_all
+    ' _ "$box/scripts/run-dns-validation.sh" >/dev/null 2>&1
+    if [[ -d "$self_box" ]]; then
+        pass "cleanup_all preserves TMP_DIR itself when basename matches exitmap_tor_*"
+    else
+        fail "cleanup_all -mindepth 1 self-deletion guard" "TMP_DIR $self_box was deleted"
+        return
+    fi
+
+    # Regression check: validate_config_values rejects 0 and leading-zero cron log settings
+    for bad_cfg in "CRON_LOG_MAX_BYTES=0" "CRON_LOG_MAX_BYTES=008388608" "CRON_LOG_ARCHIVES=0" "KEEP_BACKUPS=0"; do
+        local var_name="${bad_cfg%%=*}"
+        local val_err
+        # shellcheck disable=SC2016
+        if val_err=$(bash -c '
+            source "$1"
+            export "$2"
+            validate_config_values
+        ' _ "$box/scripts/common.sh" "$bad_cfg" 2>&1); then
+            fail "validate_config_values $bad_cfg" "expected validation failure"
+            return
+        fi
+        if [[ "$val_err" != *"$var_name"* ]]; then
+            fail "validate_config_values $bad_cfg error text" "got: $val_err"
+            return
+        fi
+    done
+    pass "validate_config_values rejects zero and leading-zero positive-integer settings by name"
+
+    # Regression check: failed gzip in rotate_log_copytruncate preserves original log and archive
+    local fail_bin="$box/fail-gzip-bin"
+    mkdir -p "$fail_bin"
+    printf '#!/usr/bin/env bash\nexit 1\n' > "$fail_bin/gzip"
+    chmod +x "$fail_bin/gzip"
+    printf '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef_keep_intact\n' > "$box/logs/keep.log"
+    # shellcheck disable=SC2016
+    PATH="$fail_bin:$PATH" env EXITMAP_TEST_MODE=1 bash -c '
+        source "$1"
+        rotate_log_copytruncate "$2" 64 2
+    ' _ "$box/scripts/run-dns-validation.sh" "$box/logs/keep.log" >/dev/null 2>&1
+    if grep -q "_keep_intact" "$box/logs/keep.log"; then
+        pass "rotate_log_copytruncate preserves original log intact when gzip fails"
+    else
+        fail "rotate_log_copytruncate gzip failure preservation"
     fi
 }
 
