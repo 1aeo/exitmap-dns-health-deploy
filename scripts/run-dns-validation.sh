@@ -28,44 +28,8 @@ DEPLOY_DIR="$(dirname "$SCRIPT_DIR")"
 EXITMAP_DIR="${EXITMAP_DIR:-$(dirname "$DEPLOY_DIR")/exitmap}"
 
 # Parse command line arguments
-MODE="single"
-INSTANCE_COUNT=1
-
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        -c|--cross-validate)
-            MODE="cross-validate"
-            INSTANCE_COUNT="${2:-2}"
-            shift 2
-            ;;
-        -s|--split)
-            MODE="split"
-            INSTANCE_COUNT="${2:-2}"
-            shift 2
-            ;;
-        -p|--parallel)
-            # Legacy: treat --parallel as --cross-validate 2
-            MODE="cross-validate"
-            INSTANCE_COUNT=2
-            shift
-            ;;
-        -h|--help)
-            echo "Usage: $0 [OPTIONS]"
-            echo ""
-            echo "Options:"
-            echo "  -c, --cross-validate N   Cross-validation mode with N instances"
-            echo "                           (all scan all relays, pass if any succeeds)"
-            echo "  -s, --split N            Split mode with N instances"
-            echo "                           (divide relays among instances)"
-            echo "  -p, --parallel           Legacy: same as --cross-validate 2"
-            echo "  -h, --help               Show this help"
-            exit 0
-            ;;
-        *)
-            shift
-            ;;
-    esac
-done
+MODE="${MODE:-single}"
+INSTANCE_COUNT="${INSTANCE_COUNT:-1}"
 
 # Validate command-line arguments
 validate_args() {
@@ -81,7 +45,46 @@ validate_args() {
         fi
     fi
 }
-validate_args
+
+if [[ "${EXITMAP_TEST_MODE:-0}" != "1" ]]; then
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -c|--cross-validate)
+                MODE="cross-validate"
+                INSTANCE_COUNT="${2:-2}"
+                shift 2
+                ;;
+            -s|--split)
+                MODE="split"
+                INSTANCE_COUNT="${2:-2}"
+                shift 2
+                ;;
+            -p|--parallel)
+                # Legacy: treat --parallel as --cross-validate 2
+                MODE="cross-validate"
+                INSTANCE_COUNT=2
+                shift
+                ;;
+            -h|--help)
+                echo "Usage: $0 [OPTIONS]"
+                echo ""
+                echo "Options:"
+                echo "  -c, --cross-validate N   Cross-validation mode with N instances"
+                echo "                           (all scan all relays, pass if any succeeds)"
+                echo "  -s, --split N            Split mode with N instances"
+                echo "                           (divide relays among instances)"
+                echo "  -p, --parallel           Legacy: same as --cross-validate 2"
+                echo "  -h, --help               Show this help"
+                exit 0
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+
+    validate_args
+fi
 
 # Load configuration
 if [[ -f "$DEPLOY_DIR/config.env" ]]; then
@@ -147,7 +150,7 @@ TOR_CACHE_DIR="$TMP_DIR/tor_cache"
 
 # Validate exitmap installation
 EXITMAP_BIN="$EXITMAP_DIR/bin/exitmap"
-if [[ ! -f "$EXITMAP_BIN" ]]; then
+if [[ "${EXITMAP_TEST_MODE:-0}" != "1" ]] && [[ ! -f "$EXITMAP_BIN" ]]; then
     echo "ERROR: exitmap not found at: $EXITMAP_BIN" >&2
     echo "" >&2
     echo "Expected directory structure:" >&2
@@ -326,7 +329,24 @@ cleanup_all() {
     cleanup_instance "$TMP_DIR/exitmap_tor"
     cleanup_instance "$TMP_DIR/exitmap_tor_temp"
     
-    # 5. Cleanup temp files
+    # 5. Remove redundant per-wave tor directories once shared cache is populated,
+    #    and prune any stale exitmap_tor_* directories older than 24 hours.
+    #    ($TOR_CACHE_DIR is named tor_cache, never exitmap_tor_*.)
+    if [[ -n "${TOR_CACHE_DIR:-}" && -d "$TOR_CACHE_DIR" ]] && compgen -G "$TOR_CACHE_DIR/cached-*" >/dev/null; then
+        local was_nullglob=false
+        shopt -q nullglob && was_nullglob=true
+        shopt -s nullglob
+        local wave_dir
+        for wave_dir in "$TMP_DIR"/exitmap_tor_w*; do
+            [[ -d "$wave_dir" ]] && rm -rf -- "$wave_dir" 2>/dev/null || true
+        done
+        $was_nullglob || shopt -u nullglob
+    fi
+    if [[ -d "${TMP_DIR:-}" ]]; then
+        find "$TMP_DIR" -mindepth 1 -maxdepth 1 -type d -name 'exitmap_tor_*' -mmin +1440 -exec rm -rf -- {} + 2>/dev/null || true
+    fi
+
+    # 6. Cleanup temp files
     rm -f "$LOCK_FILE" 2>/dev/null || true
     rm -f "$TMP_DIR"/exitmap_fps_*.txt 2>/dev/null || true
 }
@@ -692,25 +712,59 @@ do_uploads() {
     local report_file="${OUTPUT_DIR}/dns_health_${TIMESTAMP}.json"
     local latest_report="${OUTPUT_DIR}/latest.json"
     
-    local pids=()
-    
+    local do_pid="" r2_pid="" do_exit=0 r2_exit=0
+    local r2_result_file=""
+
+    # When both R2 and DO run in parallel, R2 takes the primary daily local backup
+    # and signals its result before DO runs local backup or overwrites live content.
+    if [[ "${DO_ENABLED:-false}" == "true" && "${R2_ENABLED:-false}" == "true" ]]; then
+        if [[ -x "$DEPLOY_DIR/scripts/upload-r2.sh" && -x "$DEPLOY_DIR/scripts/upload-do.sh" ]]; then
+            r2_result_file=$(mktemp "${TMP_DIR:-/tmp}/exitmap-r2-local-backup.XXXXXX" 2>/dev/null || echo "")
+        fi
+    fi
+
     if [[ "${DO_ENABLED:-false}" == "true" ]] && [[ -x "$DEPLOY_DIR/scripts/upload-do.sh" ]]; then
         log "Uploading to DigitalOcean Spaces..."
-        "$DEPLOY_DIR/scripts/upload-do.sh" &
-        pids+=($!)
+        if [[ "${R2_ENABLED:-false}" == "true" && -n "$r2_result_file" ]]; then
+            EXITMAP_PRIMARY_LOCAL_BACKUP_RESULT_FILE="$r2_result_file" "$DEPLOY_DIR/scripts/upload-do.sh" &
+        else
+            "$DEPLOY_DIR/scripts/upload-do.sh" &
+        fi
+        do_pid=$!
     fi
     
     if [[ "${R2_ENABLED:-false}" == "true" ]] && [[ -x "$DEPLOY_DIR/scripts/upload-r2.sh" ]]; then
         log "Uploading to Cloudflare R2..."
-        "$DEPLOY_DIR/scripts/upload-r2.sh" &
-        pids+=($!)
+        (
+            r2_rc=0
+            EXITMAP_LOCAL_BACKUP_RESULT_FILE="$r2_result_file" "$DEPLOY_DIR/scripts/upload-r2.sh" || r2_rc=$?
+            if [[ -n "$r2_result_file" && ! -s "$r2_result_file" ]]; then
+                printf 'failed\n' > "${r2_result_file}.tmp.$$" 2>/dev/null &&
+                    mv -f -- "${r2_result_file}.tmp.$$" "$r2_result_file" 2>/dev/null ||
+                    rm -f -- "${r2_result_file}.tmp.$$" 2>/dev/null || true
+            fi
+            exit "$r2_rc"
+        ) &
+        r2_pid=$!
     fi
-    
-    for pid in "${pids[@]:-}"; do
-        if ! wait "$pid"; then
-            log "Upload failed (PID $pid)"
+
+    if [[ -n "$do_pid" ]]; then
+        wait "$do_pid" || do_exit=$?
+        if [[ $do_exit -ne 0 ]]; then
+            log "DO upload failed (PID $do_pid, exit $do_exit)"
         fi
-    done
+    fi
+
+    if [[ -n "$r2_pid" ]]; then
+        wait "$r2_pid" || r2_exit=$?
+        if [[ $r2_exit -ne 0 ]]; then
+            log "R2 upload failed (PID $r2_pid, exit $r2_exit)"
+        fi
+    fi
+
+    if [[ -n "$r2_result_file" ]]; then
+        rm -f -- "$r2_result_file"
+    fi
 }
 
 # Helper: Start N parallel instances
@@ -1147,6 +1201,85 @@ except Exception as e:
     $any_success
 }
 
+get_file_size_bytes() {
+    local file=$1
+    if stat -c '%s' "$file" >/dev/null 2>&1; then
+        stat -c '%s' "$file"
+    elif stat -f '%z' "$file" >/dev/null 2>&1; then
+        stat -f '%z' "$file"
+    else
+        wc -c < "$file" | tr -d '[:space:]'
+    fi
+}
+
+# Copy-truncate rotation preserves the open file descriptor used by cron redirects (>>)
+# and leaves the original log intact if staging, compression, or archive installation fails.
+rotate_log_copytruncate() {
+    local log_file=$1
+    local max_bytes=$2
+    local keep_archives=$3
+
+    [[ -f "$log_file" && ! -L "$log_file" ]] || return 0
+    local size
+    size=$(get_file_size_bytes "$log_file")
+    [[ "$size" =~ ^[0-9]+$ ]] || return 0
+    [[ "$size" -ge "$max_bytes" ]] || return 0
+
+    local staging="${log_file}.1.tmp.$$"
+    if ! cp -- "$log_file" "$staging" || ! gzip -f -- "$staging"; then
+        rm -f -- "$staging" "${staging}.gz" 2>/dev/null || true
+        log "Warning: Failed to stage/compress log rotation for $(basename "$log_file"); original log left intact"
+        return 0
+    fi
+
+    local i prev
+    for ((i = keep_archives; i >= 2; i--)); do
+        prev=$((i - 1))
+        if [[ -f "${log_file}.${prev}.gz" ]]; then
+            mv -f -- "${log_file}.${prev}.gz" "${log_file}.${i}.gz"
+        fi
+    done
+
+    if mv -f -- "${staging}.gz" "${log_file}.1.gz"; then
+        : > "$log_file"
+        log "Rotated log: $(basename "$log_file") (${size} bytes)"
+    else
+        log "Warning: Failed to install ${log_file}.1.gz (staged archive preserved at ${staging}.gz); original log left intact"
+    fi
+}
+
+maintain_logs() {
+    local compress_days="${LOG_COMPRESS_DAYS:-30}"
+    local max_bytes="${CRON_LOG_MAX_BYTES:-33554432}"
+    local keep_archives="${CRON_LOG_ARCHIVES:-3}"
+    local current_log_name
+    current_log_name=$(basename "${UNIFIED_LOG:-validation_active.log}")
+
+    if [[ ! "$compress_days" =~ ^[0-9]+$ ]]; then
+        log "Warning: Invalid LOG_COMPRESS_DAYS=$compress_days; skipping validation log compression"
+    elif [[ -d "$LOG_DIR" ]]; then
+        local compressed_count=0 old_log
+        while IFS= read -r -d '' old_log; do
+            if gzip -9 -- "$old_log" 2>/dev/null; then
+                ((compressed_count++)) || true
+            fi
+        done < <(find "$LOG_DIR" -maxdepth 1 -type f -name 'validation_*.log' ! -name "$current_log_name" -mtime "+${compress_days}" -print0 2>/dev/null)
+        if [[ $compressed_count -gt 0 ]]; then
+            log "Compressed $compressed_count validation log(s) older than ${compress_days} days"
+        fi
+    fi
+
+    if [[ ! "$max_bytes" =~ ^[1-9][0-9]*$ ]] || [[ ! "$keep_archives" =~ ^[1-9][0-9]*$ ]]; then
+        log "Warning: Invalid CRON_LOG_MAX_BYTES/CRON_LOG_ARCHIVES; skipping cron log rotation"
+        return 0
+    fi
+
+    if [[ -d "$LOG_DIR" ]]; then
+        rotate_log_copytruncate "$LOG_DIR/cron.log" "$max_bytes" "$keep_archives"
+        rotate_log_copytruncate "$LOG_DIR/prune.log" "$max_bytes" "$keep_archives"
+    fi
+}
+
 # Main entry point
 main() {
     mkdir -p "$OUTPUT_DIR" "$LOG_DIR" "$TMP_DIR"
@@ -1216,6 +1349,14 @@ main() {
             ;;
     esac
     
+    # Prune old backups and maintain logs on success (non-fatal)
+    if [[ $exit_code -eq 0 ]]; then
+        if [[ -x "$DEPLOY_DIR/scripts/prune-backups.sh" ]]; then
+            "$DEPLOY_DIR/scripts/prune-backups.sh" >> "$LOG_DIR/prune.log" 2>&1 || true
+        fi
+        maintain_logs || true
+    fi
+    
     local end_time=$(date +%s)
     local duration=$((end_time - start_time))
     
@@ -1258,4 +1399,6 @@ main() {
     exit $exit_code
 }
 
-main "$@"
+if [[ "${EXITMAP_TEST_MODE:-0}" != "1" ]]; then
+    main "$@"
+fi
