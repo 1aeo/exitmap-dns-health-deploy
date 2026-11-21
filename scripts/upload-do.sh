@@ -90,6 +90,30 @@ if [[ "$ACTION" == "list" ]]; then
     exit 0
 fi
 
+# Local-only fallback mode runs before file-upload dispatch (cannot take file args)
+if [[ "$LOCAL_BACKUP_ONLY" == "true" ]]; then
+    if [[ ${#POSITIONAL[@]} -gt 0 && -f "${POSITIONAL[0]}" ]]; then
+        log_error "--local-backup-only cannot be used with file arguments"
+        exit 2
+    fi
+    init_upload "${POSITIONAL[0]:-}"
+    check_rclone || exit 1
+    ensure_do_remote || exit 1
+    BUCKET="${EXITMAP_DO_REMOTE}:${DO_SPACES_BUCKET:?DO_SPACES_BUCKET not set}"
+    log "☁️  DO Spaces fallback local backup: ${DO_SPACES_BUCKET}"
+    backup_rc=0
+    maybe_backup "$BUCKET" "$LOCAL_BACKUP_MARKER" local "$FORCE" || backup_rc=$?
+    case "${_LOCAL_BACKUP_OUTCOME:-failed}" in
+        created|already_done|skipped_disabled)
+            log_success "DO Spaces local backup complete"
+            exit 0
+            ;;
+        *)
+            exit "${backup_rc:-1}"
+            ;;
+    esac
+fi
+
 # Check if first positional arg is a file -> file upload mode
 if [[ ${#POSITIONAL[@]} -gt 0 && -f "${POSITIONAL[0]}" ]]; then
     init_upload
@@ -103,24 +127,21 @@ fi
 
 init_upload "${POSITIONAL[0]:-}"
 
-if [[ "$LOCAL_BACKUP_ONLY" == "true" ]]; then
-    check_rclone || exit 1
-    ensure_do_remote || exit 1
-    BUCKET="${EXITMAP_DO_REMOTE}:${DO_SPACES_BUCKET:?DO_SPACES_BUCKET not set}"
-    log "☁️  DO Spaces fallback local backup: ${DO_SPACES_BUCKET}"
-    maybe_backup "$BUCKET" "$LOCAL_BACKUP_MARKER" local "$FORCE" || true
-    if [[ "${_LOCAL_BACKUP_OUTCOME:-failed}" == "created" || "${_LOCAL_BACKUP_OUTCOME:-failed}" == "already_done" ]]; then
-        log_success "DO Spaces local backup complete"
-    fi
-    exit 0
-fi
-
 check_rclone || exit 1
 [[ -d "$SOURCE_DIR" ]] || { log_error "Source not found: $SOURCE_DIR"; exit 1; }
 ensure_do_remote || exit 1
 
 BUCKET="${EXITMAP_DO_REMOTE}:${DO_SPACES_BUCKET:?DO_SPACES_BUCKET not set}"
 log "☁️  DO Spaces: ${DO_SPACES_BUCKET} | $TRANSFERS transfers"
+
+if [[ "${SKIP_LOCAL_BACKUP:-false}" != "true" ]] && [[ "$FORCE" != "true" ]] &&
+    [[ ! ( -f "$LOCAL_BACKUP_MARKER" && "$(cat "$LOCAL_BACKUP_MARKER" 2>/dev/null || true)" == "$TODAY" ) ]] &&
+    [[ -n "${EXITMAP_PRIMARY_LOCAL_BACKUP_RESULT_FILE:-}" ]]; then
+    if wait_for_primary_local_backup_result "$EXITMAP_PRIMARY_LOCAL_BACKUP_RESULT_FILE" "${EXITMAP_LOCAL_BACKUP_WAIT_TIMEOUT:-7200}"; then
+        # shellcheck disable=SC2034 # Read in sourced upload-common.sh
+        SKIP_LOCAL_BACKUP=true
+    fi
+fi
 
 maybe_backup "$BUCKET" "$LOCAL_BACKUP_MARKER" local "$FORCE" || true
 maybe_backup "$BUCKET" "$LOG_DIR/last-do-backup-date" remote "$FORCE" || true

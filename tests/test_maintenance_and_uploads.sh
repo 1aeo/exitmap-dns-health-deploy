@@ -216,13 +216,33 @@ EOF
     shopt -s nullglob
     local_dirs=("$box/backups"/backup-*)
     shopt -u nullglob
-    local do_local_syncs
+    local do_local_syncs do_backup_line do_live_line
     do_local_syncs=$(grep -c "sync exitmap-spaces:test-do .*/backups/backup-" "$rclone_log" || true)
-    if [[ ${#local_dirs[@]} -eq 1 && "$do_local_syncs" -eq 1 && -f "$box/logs/last-local-backup-date" ]]; then
-        pass "do_uploads falls back to DO local backup when R2 fails pre-checks"
+    do_backup_line=$(grep -nE 'sync exitmap-spaces:test-do .*/backups/backup-' "$rclone_log" | head -n 1 | cut -d: -f1 || true)
+    do_live_line=$(grep -nE "sync $box/public exitmap-spaces:test-do " "$rclone_log" | head -n 1 | cut -d: -f1 || true)
+    if [[ ${#local_dirs[@]} -eq 1 && "$do_local_syncs" -eq 1 && -f "$box/logs/last-local-backup-date" && \
+          -n "$do_backup_line" && -n "$do_live_line" && "$do_backup_line" -lt "$do_live_line" ]]; then
+        pass "do_uploads falls back to pre-upload DO local backup when R2 fails pre-checks"
     else
-        fail "do_uploads R2 pre-check failure fallback" "dirs=${#local_dirs[@]} do_local_syncs=$do_local_syncs"
+        fail "do_uploads R2 pre-check failure fallback" "dirs=${#local_dirs[@]} do_local_syncs=$do_local_syncs b=$do_backup_line l=$do_live_line"
+        return
     fi
+
+    # Regression check: --local-backup-only returns non-zero on failure and rejects file args
+    rm -rf "$box/backups"/backup-* "$box/logs/last-local-backup-date"
+    local lb_rc=0
+    MOCK_RCLONE_LOG="$rclone_log" MOCK_FAIL_LOCAL=1 "$box/scripts/upload-do.sh" --local-backup-only >/dev/null 2>&1 || lb_rc=$?
+    if [[ $lb_rc -eq 0 ]]; then
+        fail "upload-do --local-backup-only failure exit code" "expected non-zero exit"
+        return
+    fi
+    lb_rc=0
+    "$box/scripts/upload-do.sh" --local-backup-only "$box/public/latest.json" >/dev/null 2>&1 || lb_rc=$?
+    if [[ $lb_rc -ne 2 ]]; then
+        fail "upload-do --local-backup-only rejects file argument" "expected exit 2, got $lb_rc"
+        return
+    fi
+    pass "upload-do --local-backup-only propagates backup failure and rejects file arguments"
 }
 
 test_parallel_flock_dedup() {

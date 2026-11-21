@@ -713,13 +713,11 @@ do_uploads() {
     local latest_report="${OUTPUT_DIR}/latest.json"
     
     local do_pid="" r2_pid="" do_exit=0 r2_exit=0
-    local do_args=()
-    local r2_result_file="" r2_backup_result=""
+    local r2_result_file=""
 
-    # When both R2 and DO run in parallel, let R2 take the single daily local backup
-    # and propagate its local-backup outcome so DO falls back if R2 fails/skips.
+    # When both R2 and DO run in parallel, R2 takes the primary daily local backup
+    # and signals its result before DO runs local backup or overwrites live content.
     if [[ "${DO_ENABLED:-false}" == "true" && "${R2_ENABLED:-false}" == "true" ]]; then
-        do_args+=(--no-local-backup)
         if [[ -x "$DEPLOY_DIR/scripts/upload-r2.sh" && -x "$DEPLOY_DIR/scripts/upload-do.sh" ]]; then
             r2_result_file=$(mktemp "${TMP_DIR:-/tmp}/exitmap-r2-local-backup.XXXXXX" 2>/dev/null || echo "")
         fi
@@ -727,40 +725,43 @@ do_uploads() {
 
     if [[ "${DO_ENABLED:-false}" == "true" ]] && [[ -x "$DEPLOY_DIR/scripts/upload-do.sh" ]]; then
         log "Uploading to DigitalOcean Spaces..."
-        "$DEPLOY_DIR/scripts/upload-do.sh" ${do_args[@]+"${do_args[@]}"} &
+        if [[ "${R2_ENABLED:-false}" == "true" && -n "$r2_result_file" ]]; then
+            EXITMAP_PRIMARY_LOCAL_BACKUP_RESULT_FILE="$r2_result_file" "$DEPLOY_DIR/scripts/upload-do.sh" &
+        else
+            "$DEPLOY_DIR/scripts/upload-do.sh" &
+        fi
         do_pid=$!
     fi
     
     if [[ "${R2_ENABLED:-false}" == "true" ]] && [[ -x "$DEPLOY_DIR/scripts/upload-r2.sh" ]]; then
         log "Uploading to Cloudflare R2..."
-        EXITMAP_LOCAL_BACKUP_RESULT_FILE="$r2_result_file" "$DEPLOY_DIR/scripts/upload-r2.sh" &
+        (
+            r2_rc=0
+            EXITMAP_LOCAL_BACKUP_RESULT_FILE="$r2_result_file" "$DEPLOY_DIR/scripts/upload-r2.sh" || r2_rc=$?
+            if [[ -n "$r2_result_file" && ! -s "$r2_result_file" ]]; then
+                printf 'failed\n' > "${r2_result_file}.tmp.$$" 2>/dev/null &&
+                    mv -f -- "${r2_result_file}.tmp.$$" "$r2_result_file" 2>/dev/null ||
+                    rm -f -- "${r2_result_file}.tmp.$$" 2>/dev/null || true
+            fi
+            exit "$r2_rc"
+        ) &
         r2_pid=$!
     fi
 
     if [[ -n "$do_pid" ]]; then
-        if ! wait "$do_pid"; then
-            do_exit=$?
+        wait "$do_pid" || do_exit=$?
+        if [[ $do_exit -ne 0 ]]; then
             log "DO upload failed (PID $do_pid, exit $do_exit)"
         fi
     fi
 
     if [[ -n "$r2_pid" ]]; then
-        if ! wait "$r2_pid"; then
-            r2_exit=$?
+        wait "$r2_pid" || r2_exit=$?
+        if [[ $r2_exit -ne 0 ]]; then
             log "R2 upload failed (PID $r2_pid, exit $r2_exit)"
         fi
     fi
 
-    if [[ -n "$do_pid" && -n "$r2_pid" && "$do_exit" -eq 0 ]]; then
-        if [[ -n "$r2_result_file" && -f "$r2_result_file" ]]; then
-            r2_backup_result=$(cat "$r2_result_file" 2>/dev/null || true)
-        fi
-        if [[ "$r2_exit" -ne 0 || "$r2_backup_result" == "failed" || "$r2_backup_result" == "skipped" ]]; then
-            log "R2 did not complete today's local backup (${r2_backup_result:-exit $r2_exit}); falling back to DO local backup..."
-            "$DEPLOY_DIR/scripts/upload-do.sh" --local-backup-only || \
-                log "DO fallback local backup failed"
-        fi
-    fi
     if [[ -n "$r2_result_file" ]]; then
         rm -f -- "$r2_result_file"
     fi

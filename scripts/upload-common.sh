@@ -68,7 +68,7 @@ init_upload() {
     TODAY=$(get_today)
     TIMESTAMP=$(get_timestamp)
     
-    ensure_dir "$LOG_DIR"
+    ensure_dir "$LOG_DIR" 700
     ensure_dir "$BACKUP_DIR" 700  # Restrict backup access to owner only
     
     # Rclone defaults (can override per-backend)
@@ -118,6 +118,35 @@ ensure_do_remote() {
         acl=public-read no_check_bucket=true
 }
 
+wait_for_primary_local_backup_result() {
+    local result_file="${1:-}"
+    local max_wait="${2:-7200}"
+    [[ -n "$result_file" ]] || return 1
+    [[ "$max_wait" =~ ^[1-9][0-9]*$ ]] || max_wait=7200
+
+    local max_iters=$((max_wait * 5))
+    local iter=0 result=""
+    while (( iter < max_iters )); do
+        if [[ -s "$result_file" ]]; then
+            result=$(cat "$result_file" 2>/dev/null || true)
+            case "$result" in
+                created|already_done)
+                    log "Local backup skipped (primary storage result: $result)"
+                    return 0
+                    ;;
+                failed|skipped)
+                    log "Primary storage did not complete local backup ($result); falling back to this backend"
+                    return 1
+                    ;;
+            esac
+        fi
+        sleep 0.2
+        iter=$((iter + 1))
+    done
+    log_warn "Timed out waiting ${max_wait}s for primary local backup result; falling back"
+    return 1
+}
+
 # Backup if not done today (returns 0 if backup made, 1 if skipped/failed)
 maybe_backup() {
     local bucket="$1" marker="$2" type="$3" force="${4:-false}"
@@ -134,8 +163,17 @@ maybe_backup() {
             return 1
         fi
 
-        ensure_dir "$(dirname "$LOCAL_BACKUP_LOCK_FILE")"
+        local lock_dir _old_umask
+        lock_dir=$(dirname "$LOCAL_BACKUP_LOCK_FILE")
+        ensure_dir "$lock_dir"
+        if [[ "$lock_dir" == "$LOG_DIR" ]]; then
+            chmod 700 "$lock_dir"
+        fi
+        _old_umask=$(umask)
+        umask 077
         exec 7>"$LOCAL_BACKUP_LOCK_FILE"
+        umask "$_old_umask"
+        chmod 600 "$LOCAL_BACKUP_LOCK_FILE"
         if ! flock -n 7; then
             exec 7>&-
             _LOCAL_BACKUP_OUTCOME="locked"
