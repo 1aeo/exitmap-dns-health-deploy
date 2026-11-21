@@ -15,6 +15,45 @@ EXITMAP_DO_REMOTE="exitmap-spaces"
 # Cached rclone options (populated by init_upload)
 declare -a RCLONE_OPTS_ARRAY=()
 
+# Coordination & staging defaults (can be overridden by --no-local-backup or env)
+SKIP_LOCAL_BACKUP="${SKIP_LOCAL_BACKUP:-false}"
+LOCAL_BACKUP_STAGING_DIR=""
+
+cleanup_local_backup_staging() {
+    if [[ -n "${LOCAL_BACKUP_STAGING_DIR:-}" && -d "$LOCAL_BACKUP_STAGING_DIR" ]]; then
+        rm -rf -- "$LOCAL_BACKUP_STAGING_DIR" || true
+        LOCAL_BACKUP_STAGING_DIR=""
+    fi
+}
+
+write_marker_atomically() {
+    local marker="$1"
+    local value="$2"
+    local tmp_marker="${marker}.tmp.$$"
+    ensure_dir "$(dirname "$marker")"
+    printf '%s\n' "$value" > "$tmp_marker"
+    mv -f -- "$tmp_marker" "$marker"
+}
+
+run_rclone_logged() {
+    local max_lines="$1"
+    shift
+    local log_file rc=0
+    log_file=$(mktemp "${TMPDIR:-/tmp}/exitmap-rclone.XXXXXX")
+    "$RCLONE" "$@" >"$log_file" 2>&1 || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        if [[ "$max_lines" -gt 0 && -s "$log_file" ]]; then
+            head -n "$max_lines" "$log_file"
+        fi
+    else
+        if [[ -s "$log_file" ]]; then
+            tail -n 20 "$log_file" >&2 || true
+        fi
+    fi
+    rm -f -- "$log_file"
+    return "$rc"
+}
+
 # Initialize paths and config
 init_upload() {
     init_paths 2  # Use grandparent caller's location
@@ -23,6 +62,8 @@ init_upload() {
     SOURCE_DIR="${1:-${OUTPUT_DIR:-$DEPLOY_DIR/public}}"
     BACKUP_DIR="${BACKUP_DIR:-$DEPLOY_DIR/backups}"
     LOG_DIR="${LOG_DIR:-$DEPLOY_DIR/logs}"
+    LOCAL_BACKUP_MARKER="${LOCAL_BACKUP_MARKER:-$LOG_DIR/last-local-backup-date}"
+    LOCAL_BACKUP_LOCK_FILE="${LOCAL_BACKUP_LOCK_FILE:-$LOG_DIR/.local-backup.lock}"
     RCLONE="${RCLONE_PATH:-$(command -v rclone 2>/dev/null || echo "$HOME/bin/rclone")}"
     TODAY=$(get_today)
     TIMESTAMP=$(get_timestamp)
@@ -77,36 +118,82 @@ ensure_do_remote() {
         acl=public-read no_check_bucket=true
 }
 
-# Backup if not done today (returns 0 if backup made, 1 if skipped)
+# Backup if not done today (returns 0 if backup made, 1 if skipped/failed)
 maybe_backup() {
     local bucket="$1" marker="$2" type="$3" force="${4:-false}"
-    [[ "$force" == "true" ]] || { [[ -f "$marker" && "$(cat "$marker")" == "$TODAY" ]] && return 1; }
-    
-    local target
+
     if [[ "$type" == "local" ]]; then
-        target="$BACKUP_DIR/backup-$TIMESTAMP"
-        log "Local backup → $target"
-        mkdir -p "$target"
-        "$RCLONE" sync "$bucket" "$target" --exclude "_backups/**" "${RCLONE_OPTS_ARRAY[@]}" 2>&1 | head -5
-    else
-        target="$bucket/_backups/$TIMESTAMP"
-        log "Remote backup → $target"
-        "$RCLONE" sync "$bucket" "$target" --exclude "_backups/**" "${RCLONE_OPTS_ARRAY[@]}" 2>&1 | head -5
+        if [[ "${SKIP_LOCAL_BACKUP:-false}" == "true" && "$force" != "true" ]]; then
+            log "Local backup skipped (--no-local-backup)"
+            return 1
+        fi
+        if [[ "$force" != "true" && -f "$marker" && "$(cat "$marker" 2>/dev/null || true)" == "$TODAY" ]]; then
+            return 1
+        fi
+
+        ensure_dir "$(dirname "$LOCAL_BACKUP_LOCK_FILE")"
+        exec 7>"$LOCAL_BACKUP_LOCK_FILE"
+        if ! flock -n 7; then
+            exec 7>&-
+            log "Local backup skipped (another upload holds local backup lock)"
+            return 1
+        fi
+
+        # Re-check shared marker after acquiring lock in case sibling upload just finished
+        if [[ "$force" != "true" && -f "$marker" && "$(cat "$marker" 2>/dev/null || true)" == "$TODAY" ]]; then
+            exec 7>&-
+            return 1
+        fi
+
+        local ts final_target tmp_target
+        ts=$(get_timestamp)
+        final_target="$BACKUP_DIR/backup-${ts}"
+        [[ -e "$final_target" ]] && final_target="${final_target}-$$"
+        tmp_target="$BACKUP_DIR/backup-${ts}.tmp.$$"
+
+        log "Local backup → $final_target"
+        LOCAL_BACKUP_STAGING_DIR="$tmp_target"
+        mkdir -p "$tmp_target"
+
+        if ! run_rclone_logged 5 sync "$bucket" "$tmp_target" --exclude "_backups/**" "${RCLONE_OPTS_ARRAY[@]}"; then
+            log_warn "Local backup failed; cleaning staging directory"
+            rm -rf -- "$tmp_target" || true
+            LOCAL_BACKUP_STAGING_DIR=""
+            exec 7>&-
+            return 1
+        fi
+
+        mv -- "$tmp_target" "$final_target"
+        LOCAL_BACKUP_STAGING_DIR=""
+        write_marker_atomically "$marker" "$TODAY"
+        exec 7>&-
+        log_success "Local backup done"
+        return 0
     fi
-    echo "$TODAY" > "$marker"
-    log_success "${type^} backup done"
+
+    [[ "$force" == "true" ]] || { [[ -f "$marker" && "$(cat "$marker" 2>/dev/null || true)" == "$TODAY" ]] && return 1; }
+
+    local target="$bucket/_backups/$TIMESTAMP"
+    log "Remote backup → $target"
+    if ! run_rclone_logged 5 sync "$bucket" "$target" --exclude "_backups/**" "${RCLONE_OPTS_ARRAY[@]}"; then
+        log_warn "Remote backup failed; marker not updated"
+        return 1
+    fi
+    write_marker_atomically "$marker" "$TODAY"
+    log_success "Remote backup done"
 }
 
-# Main upload function (syncs JSON files, excludes index.html)
+# Main upload function (syncs JSON files, excludes index.html and _backups)
 do_upload() {
     local bucket="$1"
     log "Syncing $SOURCE_DIR → $bucket"
-    "$RCLONE" sync "$SOURCE_DIR" "$bucket" \
-        --exclude "_backups/**" \
-        --exclude "index.html" \
-        --include "*.json" \
-        --include "archives/*.tar.gz" \
-        "${RCLONE_OPTS_ARRAY[@]}" 2>&1 | head -10
+    run_rclone_logged 10 sync "$SOURCE_DIR" "$bucket" \
+        --filter "- _backups/**" \
+        --filter "- index.html" \
+        --filter "+ *.json" \
+        --filter "+ archives/*.tar.gz" \
+        --filter "- *" \
+        "${RCLONE_OPTS_ARRAY[@]}"
     log_success "Upload complete"
 }
 
@@ -115,9 +202,10 @@ upload_files() {
     local bucket="$1"; shift
     for file in "$@"; do
         [[ -f "$file" ]] || { log_warn "File not found: $file"; continue; }
-        local basename=$(basename "$file")
-        log "Uploading $basename..."
-        "$RCLONE" copyto "$file" "$bucket/$basename" "${RCLONE_OPTS_ARRAY[@]}" 2>&1 | head -3
+        local file_basename
+        file_basename=$(basename "$file")
+        log "Uploading $file_basename..."
+        run_rclone_logged 3 copyto "$file" "$bucket/$file_basename" "${RCLONE_OPTS_ARRAY[@]}"
     done
     log_success "Files uploaded"
 }
@@ -126,12 +214,37 @@ upload_files() {
 list_backups() {
     local bucket="$1"
     local storage="$2"
-    local storage_lower=$(echo "$storage" | tr '[:upper:]' '[:lower:]')
-    local local_marker="$LOG_DIR/last-${storage_lower}-local-backup-date"
+    local storage_lower
+    storage_lower=$(echo "$storage" | tr '[:upper:]' '[:lower:]')
+    local local_marker="${LOCAL_BACKUP_MARKER:-$LOG_DIR/last-local-backup-date}"
+    local legacy_local_marker="$LOG_DIR/last-${storage_lower}-local-backup-date"
     local remote_marker="$LOG_DIR/last-${storage_lower}-backup-date"
-    
-    echo "📦 Local: $(ls -1dt "$BACKUP_DIR"/backup-* 2>/dev/null | head -3 | tr '\n' ' ' || echo none)"
-    echo "📦 ${storage}: $("$RCLONE" lsf "$bucket/_backups/" --dirs-only 2>/dev/null | sort -r | head -3 | tr '\n' ' ' || echo none)"
-    echo "📅 Last local: $(cat "$local_marker" 2>/dev/null || echo never)"
+
+    local was_nullglob=false
+    shopt -q nullglob && was_nullglob=true
+    shopt -s nullglob
+    local local_backups=() candidate
+    for candidate in "$BACKUP_DIR"/backup-*; do
+        [[ -d "$candidate" ]] || continue
+        [[ "$(basename "$candidate")" == *.tmp.* ]] && continue
+        local_backups+=("$candidate")
+    done
+    $was_nullglob || shopt -u nullglob
+
+    local local_summary="none"
+    if (( ${#local_backups[@]} > 0 )); then
+        local_summary=$(printf '%s\n' "${local_backups[@]}" | LC_ALL=C sort -r | head -n 3 | tr '\n' ' ')
+    fi
+
+    local last_local="never"
+    if [[ -f "$local_marker" ]]; then
+        last_local=$(cat "$local_marker" 2>/dev/null || echo never)
+    elif [[ -f "$legacy_local_marker" ]]; then
+        last_local=$(cat "$legacy_local_marker" 2>/dev/null || echo never)
+    fi
+
+    echo "📦 Local: ${local_summary}"
+    echo "📦 ${storage}: $("$RCLONE" lsf "$bucket/_backups/" --dirs-only 2>/dev/null | LC_ALL=C sort -r | head -n 3 | tr '\n' ' ' || echo none)"
+    echo "📅 Last local: ${last_local}"
     echo "📅 Last ${storage}: $(cat "$remote_marker" 2>/dev/null || echo never)"
 }
