@@ -126,8 +126,6 @@ fi
 [[ -n "${DNS_MAX_RETRIES:-}" ]] && export DNS_MAX_RETRIES
 [[ -n "${DNS_HARD_TIMEOUT:-}" ]] && export DNS_HARD_TIMEOUT
 [[ -n "${DNS_RETRY_DELAY:-}" ]] && export DNS_RETRY_DELAY
-# Grace period for straggling probes before termination
-export EXITMAP_GRACE_TIMEOUT="${EXITMAP_GRACE_TIMEOUT:-10}"
 FIRST_HOP="${FIRST_HOP:-}"
 # Export first hop for tracking in dnshealth module results
 [[ -n "${FIRST_HOP}" ]] && export EXITMAP_FIRST_HOP="$FIRST_HOP"
@@ -136,7 +134,7 @@ DO_ENABLED="${DO_ENABLED:-false}"
 R2_ENABLED="${R2_ENABLED:-false}"
 
 # Tor bootstrap retry settings
-TOR_BOOTSTRAP_TIMEOUT="${TOR_BOOTSTRAP_TIMEOUT:-90}"
+export TOR_BOOTSTRAP_TIMEOUT="${TOR_BOOTSTRAP_TIMEOUT:-90}"
 TOR_MAX_BOOTSTRAP_RETRIES="${TOR_MAX_BOOTSTRAP_RETRIES:-3}"
 TOR_PROGRESS_CHECK_INTERVAL="${TOR_PROGRESS_CHECK_INTERVAL:-10}"
 
