@@ -4,6 +4,7 @@ config.env
 # Generated files
 wrangler.toml
 pages-static/
+.wrangler/
 
 # Runtime directories
 logs/
