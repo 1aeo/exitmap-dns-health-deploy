@@ -1,0 +1,140 @@
+{
+  "report": "dns_health_2026-11-03_00-05-01.json",
+  "source_order": "cv{instance}_w{wave}, waves then instances: cv1_w1, cv2_w1, ... cv4_w4",
+  "relays": [
+    {
+      "exit_fingerprint": "42F8E7CE864478CA292E9EA05DC11481C293F8ED",
+      "exit_nickname": "ibibUNC2",
+      "per_instance": {
+        "cv1_w1": {
+          "status": "wrong_ip",
+          "attempt": 1,
+          "timing": {
+            "total_ms": 21911
+          },
+          "resolved_ip": "23.202.88.27",
+          "expected_ip": "64.65.4.1",
+          "error": "DNS Error: Expected 64.65.4.1, got 23.202.88.27"
+        },
+        "cv2_w1": {
+          "status": "success",
+          "attempt": 1,
+          "timing": {
+            "total_ms": 19101
+          },
+          "resolved_ip": "64.65.4.1",
+          "expected_ip": "64.65.4.1"
+        },
+        "cv3_w1": {
+          "status": "wrong_ip",
+          "attempt": 1,
+          "timing": {
+            "total_ms": 8894
+          },
+          "resolved_ip": "2.18.188.209",
+          "expected_ip": "64.65.4.1",
+          "error": "DNS Error: Expected 64.65.4.1, got 2.18.188.209"
+        },
+        "cv4_w1": {
+          "status": "success",
+          "attempt": 1,
+          "timing": {
+            "total_ms": 12562
+          },
+          "resolved_ip": "64.65.4.1",
+          "expected_ip": "64.65.4.1"
+        }
+      }
+    },
+    {
+      "exit_fingerprint": "7C0AA4E3B73E407E9F5FEB1912F8BE26D8AA124D",
+      "exit_nickname": "ibibUNC0",
+      "per_instance": {
+        "cv1_w2": {
+          "status": "success",
+          "attempt": 1,
+          "timing": {
+            "total_ms": 23021
+          },
+          "resolved_ip": "64.65.4.1",
+          "expected_ip": "64.65.4.1"
+        },
+        "cv2_w2": {
+          "status": "wrong_ip",
+          "attempt": 1,
+          "timing": {
+            "total_ms": 17798
+          },
+          "resolved_ip": "23.202.88.27",
+          "expected_ip": "64.65.4.1",
+          "error": "DNS Error: Expected 64.65.4.1, got 23.202.88.27"
+        },
+        "cv3_w2": {
+          "status": "wrong_ip",
+          "attempt": 1,
+          "timing": {
+            "total_ms": 16764
+          },
+          "resolved_ip": "23.202.88.27",
+          "expected_ip": "64.65.4.1",
+          "error": "DNS Error: Expected 64.65.4.1, got 23.202.88.27"
+        },
+        "cv4_w2": {
+          "status": "success",
+          "attempt": 1,
+          "timing": {
+            "total_ms": 15773
+          },
+          "resolved_ip": "64.65.4.1",
+          "expected_ip": "64.65.4.1"
+        }
+      }
+    },
+    {
+      "exit_fingerprint": "C59E079437340E3AD14E6785C0A91A5B6F328566",
+      "exit_nickname": "ibibUNC1",
+      "per_instance": {
+        "cv1_w3": {
+          "status": "wrong_ip",
+          "attempt": 1,
+          "timing": {
+            "total_ms": 13310
+          },
+          "resolved_ip": "23.32.38.139",
+          "expected_ip": "64.65.4.1",
+          "error": "DNS Error: Expected 64.65.4.1, got 23.32.38.139"
+        },
+        "cv2_w3": {
+          "status": "wrong_ip",
+          "attempt": 1,
+          "timing": {
+            "total_ms": 22752
+          },
+          "resolved_ip": "2.18.188.209",
+          "expected_ip": "64.65.4.1",
+          "error": "DNS Error: Expected 64.65.4.1, got 2.18.188.209"
+        },
+        "cv3_w3": {
+          "status": "wrong_ip",
+          "attempt": 1,
+          "timing": {
+            "total_ms": 12019
+          },
+          "resolved_ip": "23.202.88.27",
+          "expected_ip": "64.65.4.1",
+          "error": "DNS Error: Expected 64.65.4.1, got 23.202.88.27"
+        },
+        "cv4_w3": {
+          "status": "wrong_ip",
+          "attempt": 1,
+          "timing": {
+            "total_ms": 14529
+          },
+          "resolved_ip": "2.18.205.20",
+          "expected_ip": "64.65.4.1",
+          "error": "DNS Error: Expected 64.65.4.1, got 2.18.205.20"
+        }
+      }
+    }
+  ]
+}
