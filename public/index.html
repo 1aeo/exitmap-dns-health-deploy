@@ -299,18 +299,30 @@
             border-radius: 4px;
             font-size: 0.8rem;
             font-family: monospace;
+            background: rgba(139, 148, 158, 0.15);
+            color: var(--aeo-text-muted);
         }
 
         .status-chip.success { background: rgba(63, 185, 80, 0.15); color: var(--status-success); }
         .status-chip.dns_fail { background: rgba(248, 81, 73, 0.15); color: var(--status-error); }
         .status-chip.timeout { background: rgba(210, 153, 34, 0.15); color: var(--status-warning); }
         .status-chip.hard_timeout { background: rgba(210, 153, 34, 0.15); color: var(--status-warning); }
+        .status-chip.ttl_expired { background: rgba(210, 153, 34, 0.15); color: var(--status-warning); }
         .status-chip.wrong_ip { background: rgba(163, 113, 247, 0.15); color: var(--status-purple); }
         .status-chip.relay_unreachable { background: rgba(210, 153, 34, 0.15); color: var(--status-warning); }
         .status-chip.exception { background: rgba(139, 148, 158, 0.15); color: var(--aeo-text-muted); }
-        .status-chip.socks_error { background: rgba(139, 148, 158, 0.15); color: var(--aeo-text-muted); }
-        .status-chip.network_error { background: rgba(139, 148, 158, 0.15); color: var(--aeo-text-muted); }
-        .status-chip.error { background: rgba(139, 148, 158, 0.15); color: var(--aeo-text-muted); }
+        .status-chip.socks_error,
+        .status-chip.socks_general_failure,
+        .status-chip.socks_ruleset_blocked,
+        .status-chip.connection_refused,
+        .status-chip.socks_command_unsupported,
+        .status-chip.socks_address_unsupported { background: rgba(139, 148, 158, 0.15); color: var(--aeo-text-muted); }
+        .status-chip.network_error,
+        .status-chip.network_unreachable { background: rgba(139, 148, 158, 0.15); color: var(--aeo-text-muted); }
+        .status-chip.error,
+        .status-chip.eof_error,
+        .status-chip.tor_connection_lost,
+        .status-chip.tor_connection_refused { background: rgba(139, 148, 158, 0.15); color: var(--aeo-text-muted); }
 
         .two-col-grid {
             display: grid;
@@ -380,17 +392,29 @@
             font-size: 0.7rem;
             font-weight: 500;
             font-family: monospace;
+            background: rgba(139, 148, 158, 0.2);
+            color: var(--aeo-text-muted);
         }
 
         .status-badge.success { background: rgba(63, 185, 80, 0.2); color: var(--status-success); }
         .status-badge.dns_fail { background: rgba(248, 81, 73, 0.2); color: var(--status-error); }
         .status-badge.timeout { background: rgba(210, 153, 34, 0.2); color: var(--status-warning); }
         .status-badge.hard_timeout { background: rgba(210, 153, 34, 0.2); color: var(--status-warning); }
+        .status-badge.ttl_expired { background: rgba(210, 153, 34, 0.2); color: var(--status-warning); }
         .status-badge.wrong_ip { background: rgba(163, 113, 247, 0.2); color: var(--status-purple); }
         .status-badge.relay_unreachable { background: rgba(210, 153, 34, 0.2); color: var(--status-warning); }
-        .status-badge.socks_error { background: rgba(139, 148, 158, 0.2); color: var(--aeo-text-muted); }
-        .status-badge.network_error { background: rgba(139, 148, 158, 0.2); color: var(--aeo-text-muted); }
-        .status-badge.error { background: rgba(139, 148, 158, 0.2); color: var(--aeo-text-muted); }
+        .status-badge.socks_error,
+        .status-badge.socks_general_failure,
+        .status-badge.socks_ruleset_blocked,
+        .status-badge.connection_refused,
+        .status-badge.socks_command_unsupported,
+        .status-badge.socks_address_unsupported { background: rgba(139, 148, 158, 0.2); color: var(--aeo-text-muted); }
+        .status-badge.network_error,
+        .status-badge.network_unreachable { background: rgba(139, 148, 158, 0.2); color: var(--aeo-text-muted); }
+        .status-badge.error,
+        .status-badge.eof_error,
+        .status-badge.tor_connection_lost,
+        .status-badge.tor_connection_refused { background: rgba(139, 148, 158, 0.2); color: var(--aeo-text-muted); }
         .status-badge.exception { background: rgba(139, 148, 158, 0.2); color: var(--aeo-text-muted); }
 
         .fingerprint {

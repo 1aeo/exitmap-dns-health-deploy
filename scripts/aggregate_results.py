@@ -21,17 +21,52 @@ from collections import Counter
 # pick the result with the lowest priority number as the "best" result.
 # This doesn't drop other results - it just selects which one to use as primary.
 CROSS_VALIDATION_RESULT_PRIORITY = {
-    "success": 0,           # Best - always prefer success
-    "wrong_ip": 1,          # Definitive DNS failure
-    "dns_fail": 2,          # Definitive DNS failure
-    "socks_error": 3,       # May be transient
-    "network_error": 4,     # May be transient
-    "error": 5,             # Generic error
-    "timeout": 6,           # Often transient
-    "hard_timeout": 6,      # Same priority as timeout
-    "exception": 7,         # Code error
-    "unknown": 8,           # Unknown status
-    "relay_unreachable": 9, # Circuit failure - not a DNS test result
+    "success": 0,                      # Best - always prefer success
+    "wrong_ip": 1,                     # Definitive DNS failure
+    "dns_fail": 2,                     # Definitive DNS failure
+    "socks_error": 3,                  # May be transient
+    "socks_general_failure": 3,
+    "socks_ruleset_blocked": 3,
+    "connection_refused": 3,
+    "socks_command_unsupported": 3,
+    "socks_address_unsupported": 3,
+    "network_error": 4,                # May be transient
+    "network_unreachable": 4,
+    "error": 5,                        # Generic error
+    "eof_error": 5,
+    "timeout": 6,                      # Often transient
+    "hard_timeout": 6,                 # Same priority as timeout
+    "ttl_expired": 6,
+    "exception": 7,                    # Code / scanner-side error
+    "tor_connection_lost": 7,
+    "tor_connection_refused": 7,
+    "unknown": 8,                      # Unknown status
+    "relay_unreachable": 9,            # Circuit failure - not a DNS test result
+}
+
+# Roll every non-unreachable probe status into the existing 9 metadata.dns_*
+# buckets so tested_relays == dns_success + sum(errors) without changing schema.
+STATUS_TO_DNS_METADATA_KEY = {
+    "success": "dns_success",
+    "dns_fail": "dns_fail",
+    "timeout": "dns_timeout",
+    "hard_timeout": "dns_timeout",
+    "ttl_expired": "dns_timeout",
+    "wrong_ip": "dns_wrong_ip",
+    "socks_error": "dns_socks_error",
+    "socks_general_failure": "dns_socks_error",
+    "socks_ruleset_blocked": "dns_socks_error",
+    "connection_refused": "dns_socks_error",
+    "socks_command_unsupported": "dns_socks_error",
+    "socks_address_unsupported": "dns_socks_error",
+    "network_error": "dns_network_error",
+    "network_unreachable": "dns_network_error",
+    "error": "dns_error",
+    "eof_error": "dns_error",
+    "tor_connection_lost": "dns_error",
+    "tor_connection_refused": "dns_error",
+    "exception": "dns_exception",
+    "unknown": "dns_unknown",
 }
 
 
@@ -75,6 +110,7 @@ CIRCUIT_REASON_MAP = {
     "no_such_service": "circuit_no_service",
     "measurement_expired": "circuit_measurement_expired",
     "guard_limit": "circuit_guard_limit",
+    "circuit_creation_failed": "circuit_failed",
     "circuit_failed": "circuit_failed",
 }
 
@@ -529,6 +565,13 @@ def aggregate_results(results, previous_report=None, circuit_failures=None, scan
     
     timing_stats = compute_latency_stats(timings)
 
+    dns_counts = Counter()
+    for status, count in stats.items():
+        if status == "relay_unreachable":
+            continue
+        meta_key = STATUS_TO_DNS_METADATA_KEY.get(status, "dns_unknown")
+        dns_counts[meta_key] += count
+
     # Build metadata with new schema
     metadata = {
         "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -548,15 +591,15 @@ def aggregate_results(results, previous_report=None, circuit_failures=None, scan
         "unreachable_relays": unreachable_relays,
         
         # DNS test results (all 9 with dns_ prefix)
-        "dns_success": dns_success,
-        "dns_fail": stats.get("dns_fail", 0),
-        "dns_timeout": stats.get("timeout", 0),
-        "dns_wrong_ip": stats.get("wrong_ip", 0),
-        "dns_socks_error": stats.get("socks_error", 0),
-        "dns_network_error": stats.get("network_error", 0),
-        "dns_error": stats.get("error", 0),
-        "dns_exception": stats.get("exception", 0),
-        "dns_unknown": stats.get("unknown", 0),
+        "dns_success": dns_counts["dns_success"],
+        "dns_fail": dns_counts["dns_fail"],
+        "dns_timeout": dns_counts["dns_timeout"],
+        "dns_wrong_ip": dns_counts["dns_wrong_ip"],
+        "dns_socks_error": dns_counts["dns_socks_error"],
+        "dns_network_error": dns_counts["dns_network_error"],
+        "dns_error": dns_counts["dns_error"],
+        "dns_exception": dns_counts["dns_exception"],
+        "dns_unknown": dns_counts["dns_unknown"],
     }
     
     # Add all 17 circuit failure types with explicit zeros
